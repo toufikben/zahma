@@ -1,0 +1,171 @@
+name: Tests
+
+# الاختبارات تُشغَّل هنا، لا على جهاز المطوّر.
+# الجهاز ضعيف: بناء الشبكة 11 ثانية، الاختبارات الكاملة ~25 ثانية،
+# لكن CI يمنحنا بيئة نظيفة + قاعدة PostGIS جاهزة + بيانات حقيقية.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. اختبارات سريعة بلا بيانات — تفشل في ثوانٍ إن كسرنا المنطق.
+  #    هذه الحزمة لا تحتاج قاعدة بيانات ولا مصفوفة توجيه.
+  # ---------------------------------------------------------------
+  unit:
+    name: Unit tests (no data)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: |
+          python -m pytest tests/test_predict.py tests/test_time_and_prior.py \
+            -v --tb=short
+
+  # ---------------------------------------------------------------
+  # 2. اختبارات تحتاج قاعدة بيانات وشبكة مبنية.
+  #    تبني كل شيء من الصفر ثم تتحقق — نفس مسار الإنتاج.
+  # ---------------------------------------------------------------
+  integration:
+    name: Integration (real network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: zahma
+          POSTGRES_PASSWORD: zahma
+          POSTGRES_DB: zahma
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U zahma"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PYTHONUTF8: "1"
+      DATABASE_URL: postgresql+psycopg://zahma:zahma@localhost:5432/zahma
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Download OSM extract
+        run: |
+          mkdir -p data/raw data/processed
+          curl -fsSL -o data/raw/algeria-latest.osm.pbf \
+            https://download.geofabrik.de/africa/algeria-latest.osm.pbf
+          ls -lh data/raw/
+
+      - name: Apply schema
+        run: |
+          for f in sql/*.sql; do
+            echo "── $f"
+            PGPASSWORD=zahma psql -h localhost -U zahma -d zahma \
+              -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: Extract + build network
+        run: |
+          python -c "from zahma.graph.extract import extract; extract(force=True)"
+          python -c "from zahma.graph.build import build; build()"
+
+      - name: Pick corridors + O-D pairs
+        run: python -c "from zahma.graph.corridors import run; run()"
+
+      - name: Load into database
+        run: python -c "from zahma.graph.load import run; run()"
+
+      - name: Build router matrix
+        run: python -m zahma.cli router-stats --force
+
+      - name: Seed mock history
+        run: |
+          python -m zahma.cli mock-fill \
+            --days 5 --segments 400 --pairs 40 --step-min 60
+
+      - name: Rebuild profiles
+        run: python -m zahma.cli rebuild-profiles
+
+      - name: Topology + router guards
+        run: |
+          python -m pytest tests/test_topology.py tests/test_router.py \
+            tests/test_resilience.py -v --tb=short
+
+      - name: End-to-end prediction
+        run: |
+          python -m zahma.cli estimate \
+            --from-lat 36.7167 --from-lon 3.1833 \
+            --to-lat 36.7705 --to-lon 3.0589
+
+      - name: Departure curve must vary
+        run: |
+          # الحارس الأهم: إن عاد المنحنى مسطّحاً فالمنتج لا يعرف الزحمة.
+          python - <<'PY'
+          from datetime import datetime, UTC
+          from zahma.predict.engine import departure_curve
+
+          when = datetime(2026, 11, 29, 6, 30, tzinfo=UTC)  # 07:30 محلي
+          curve = departure_curve(
+              36.7167, 3.1833, 36.7705, 3.0589,
+              now=when, horizon_min=180, step_min=30,
+          )
+          assert curve, "empty departure curve"
+          durs = [o.duration_s / 60 for o in curve]
+          spread = max(durs) - min(durs)
+          print(f"curve: {[round(d, 1) for d in durs]}")
+          print(f"spread: {spread:.1f} min")
+          assert spread > 2.0, (
+              f"departure curve is flat ({spread:.1f} min) — "
+              "class prior or profiles are not working"
+          )
+          assert curve[0].confidence >= 0.3, (
+              f"confidence too low: {curve[0].confidence}"
+          )
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-artifacts
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            data/processed/network_summary.json
+            data/processed/router_cache/matrix.npz

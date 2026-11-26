@@ -1,0 +1,127 @@
+name: Build network
+
+# كل عمل ثقيل يُنفَّذ هنا، لا على جهاز المطوّر.
+# القياس المحلي: بناء الرسم 94 ثانية، التوجيه 52 ثانية، حساب SCC 274 ثانية.
+# هذا يجعل دورة تطوير واحدة تستهلك ساعات.
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_extract:
+        description: "إعادة قراءة PBF من الصفر"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "src/zahma/graph/**"
+      - "sql/**"
+      - ".github/workflows/build-network.yml"
+
+concurrency:
+  group: build-network
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: zahma
+          POSTGRES_PASSWORD: zahma
+          POSTGRES_DB: zahma
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U zahma"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PYTHONUTF8: "1"
+      DATABASE_URL: postgresql+psycopg://zahma:zahma@localhost:5432/zahma
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install scipy pyarrow
+
+      - name: Download OSM extract
+        run: |
+          mkdir -p data/raw data/processed
+          curl -fsSL -o data/raw/algeria-latest.osm.pbf \
+            https://download.geofabrik.de/africa/algeria-latest.osm.pbf
+          ls -lh data/raw/
+
+      - name: Apply schema
+        run: |
+          for f in sql/*.sql; do
+            echo "applying $f"
+            PGPASSWORD=zahma psql -h localhost -U zahma -d zahma -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Extract OSM network
+        run: python -c "from zahma.graph.extract import extract; extract(force=True)"
+
+      - name: Build segments
+        run: python -c "from zahma.graph.build import build; build()"
+
+      - name: Pick corridors
+        run: python -c "from zahma.graph.corridors import run; run()"
+
+      - name: Load into database
+        run: python -c "from zahma.graph.load import run; run()"
+
+      - name: Build router matrix
+        run: |
+          python -c "
+          from zahma.predict.router import build_matrix, stats
+          build_matrix(force=True)
+          s = stats()
+          print(s)
+          assert s['routable_share'] >= 90, f\"routing coverage too low: {s}\"
+          assert s['segments'] > 200000, f\"too few segments: {s}\"
+          "
+
+      - name: Verify topology
+        run: python tests/test_topology.py
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-build
+          retention-days: 30
+          path: |
+            data/processed/segments.parquet
+            data/processed/corridors.json
+            data/processed/od_pairs.json
+            data/processed/osm_nodes.parquet
+            data/processed/network_summary.json
+            data/processed/router_cache/matrix.npz
+            data/processed/router_cache/routable.json
+
+      - name: Summary
+        run: |
+          {
+            echo "## Network build"
+            echo '```'
+            python -c "import json; print(json.dumps(json.load(open('data/processed/network_summary.json')), indent=2, ensure_ascii=False)[:2000])"
+            echo '```'
+            echo "## Router"
+            echo '```'
+            python -c "from zahma.predict.router import stats; print(stats())"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

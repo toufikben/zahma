@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# البيئة والأسرار
+.env
+.env.local
+*.key
+*.pem
+
+# البيانات — لا تُرفع إلى git
+# PBF حجمه 288 MB، والمخرجات تُبنى في CI وتُنشر كـArtifacts.
+data/raw/
+data/processed/
+data/pgdata/
+data/queue.db
+data/*.db
+
+# مخرجات محلية
+*.log
+logs/
+dist/
+build/
+*.apk
+*.aab
+
+# نظام التشغيل
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# محرر
+.vscode/
+.idea/
