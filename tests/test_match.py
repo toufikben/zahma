@@ -81,3 +81,45 @@ class TestMatchThresholds:
         assert MIN_EDGE_M >= 5.0
         # حافة 8 أمتار بزمن 1 ثانية = 28.8 كم/س، معقولة وتبقى.
         assert (8.0 / 1.0) * 3.6 == pytest.approx(28.8)
+
+
+class TestSpeedSanityFilter:
+    """مرشّح السرعة يرفض البيانات المستحيلة لا يقبلها بصمت."""
+
+    @staticmethod
+    def _accept(dist_m: float, travel_s: float) -> float | None:
+        """نفس منطق measure_pair — قابل للاختبار بلا شبكة ولا قاعدة."""
+        if dist_m < MIN_EDGE_M or travel_s <= 0:
+            return None
+        speed = (dist_m / travel_s) * 3.6
+        if not (1.0 <= speed <= 160.0):
+            return None
+        return speed
+
+    def test_normal_city_speed_accepted(self):
+        # 48 متراً في 4.2 ثانية ≈ 41 كم/س
+        s = self._accept(48.0, 4.2)
+        assert s is not None
+        assert 40.0 < s < 42.0
+
+    def test_zero_duration_rejected(self):
+        """زمن صفر ⇒ قسمة على صفر ⇒ سرعة لا نهائية."""
+        assert self._accept(50.0, 0.0) is None
+
+    def test_impossibly_fast_rejected(self):
+        """200 كم/س داخل العاصمة = خطأ في البيانات لا قياس."""
+        assert self._accept(1000.0, 18.0) is None  # 200 km/h
+
+    def test_stationary_rejected(self):
+        """سرعة 0.5 كم/س على حافة 50 متراً = خطأ إسقاط لا زحمة."""
+        assert self._accept(50.0, 360.0) is None
+
+    def test_short_edge_rejected(self):
+        """حافة 3 أمتار: نسبة الخطأ في الطول تهيمن على السرعة."""
+        assert self._accept(3.0, 0.3) is None
+
+    def test_motorway_speed_accepted(self):
+        """120 كم/س على الطريق السيار — معقول ويُقبل."""
+        s = self._accept(1000.0, 30.0)
+        assert s is not None
+        assert 119.0 < s < 121.0
