@@ -34,6 +34,9 @@ class Settings(BaseSettings):
 
     scan_interval_peak_min: int = 30
     scan_interval_offpeak_min: int = 120
+    # الليل مسطّح (64–68 كم/س، مدى 4.2). جمعه كل 3 ساعات يكفي لوصف
+    # الشكل وإثبات أنه لم يتغير؛ الهدف ليس اكتشاف تغيّر لا يوجد.
+    scan_interval_night_min: int = 180
     deep_interval_peak_min: int = 5
     quota_soft_limit: float = 0.90
     tz_name: str = "Africa/Algiers"

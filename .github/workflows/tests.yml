@@ -59,6 +59,7 @@ jobs:
             tests/test_provider_coverage.py \
             tests/test_night_coverage.py \
             tests/test_network_resilience.py \
+            tests/test_collect_schedule.py \
             tests/test_forecast_never_live.py \
             -v --tb=short
 

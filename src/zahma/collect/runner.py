@@ -41,6 +41,23 @@ TZ = ZoneInfo("Africa/Algiers")
 # أوقات الذروة بتوقيت الجزائر
 PEAK_HOURS = {(7, 9), (16, 19)}
 
+# الليل المسطّح: 23:00–05:00. مقاس مباشرةً من API — 23:59=64.0،
+# 01:00=66.6، 03:00=67.9، 04:00=68.2، 05:00=66.4 كم/س. المدى 4.2 كم/س
+# فقط، أي أن أي ساعة في هذا النطاق تُمثّل بقية النطاق.
+#
+# **لماذا نبطّئ هنا:** الجمع كل ساعتين طوال الليل يعني 4 دورات مقابل صفر
+# معلومة إضافية. لكننا **لا نتوقف** — قبل هذا كان الجمع يقف عند 21:00
+# فيفوّت أسرع ساعات اليوم كلها.
+NIGHT_START_HOUR = 23
+NIGHT_END_HOUR = 5
+
+
+def is_night(now: datetime | None = None) -> bool:
+    """هل نحن في الليل المسطّح؟ (23:00–05:00 محلياً)"""
+    now = now or datetime.now(UTC)
+    h = now.astimezone(TZ).hour
+    return h >= NIGHT_START_HOUR or h < NIGHT_END_HOUR
+
 
 def is_peak(now: datetime | None = None) -> bool:
     now = now or datetime.now(UTC)
@@ -320,19 +337,29 @@ def run_forever(once: bool = False) -> None:
     collector = Collector()
     cycle = 0
     print(f"[collector] starting (peak={is_peak()}, day={day_type()})", flush=True)
-
     while not stopping["flag"]:
         cycle += 1
         peak = is_peak()
-        interval = (
-            s.scan_interval_peak_min if peak else s.scan_interval_offpeak_min
-        )
+        night = is_night()
+        # ثلاث سرعات، لا سرعتان:
+        #   ذروة 30 د (المعلومة تتغير فعلاً)
+        #   نهار 120 د (يتغير ببطء لكنه يتغير)
+        #   ليل 180 د (مسطّح: 64–68 كم/س بلا بنية داخلية)
+        # الليل يُجمع فعلاً، لكن بوتيرة تعترف بأنه لا يحمل معلومة جديدة
+        # كل 30 دقيقة. قبل هذا كان الجمع **يتوقف** ليلاً، وهو خطأ مختلف:
+        # توقف = صفر عيّنة، لا عيّنة رخيصة.
+        if peak:
+            interval = s.scan_interval_peak_min
+        elif night:
+            interval = s.scan_interval_night_min
+        else:
+            interval = s.scan_interval_offpeak_min
         try:
             stats = collector.run_once()
             ok = sum(1 for v in stats.values() if v.get("ok"))
             print(
                 f"[{datetime.now(UTC).isoformat(timespec='seconds')}] "
-                f"cycle {cycle} peak={peak} ok={ok}/{len(stats)} {stats}",
+                f"cycle {cycle} peak={peak} night={night} ok={ok}/{len(stats)} {stats}",
                 flush=True,
             )
             queue.heartbeat("collector_cycle", str(cycle))
