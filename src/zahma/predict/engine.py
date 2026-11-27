@@ -143,10 +143,11 @@ def fetch_live_speed(segment_id: int, now: datetime) -> tuple[float | None, floa
                 """
                 SELECT speed_kmh, ts_utc FROM samples
                 WHERE segment_id = :i AND speed_kmh IS NOT NULL
+                  AND ts_utc <= :now
                 ORDER BY ts_utc DESC LIMIT 1
                 """
             ),
-            {"i": segment_id},
+            {"i": segment_id, "now": now},
         ).mappings().first()
     if not row:
         return None, 9999.0
@@ -159,6 +160,17 @@ def fetch_live_speeds_bulk(now: datetime, max_age_min: float = 10.0) -> dict[int
 
     `DISTINCT ON` في Postgres يعطي أحدث صف لكل مقطع دون مسح متكرر.
     هذا يحوّل 156 ألف استعلام إلى استعلام واحد.
+
+    **الحد الأعلى `ts_utc <= :now` ليس احتياطاً — هو إصلاح عيب خطير.**
+    جمعنا يعمل بـ`depart_at`، فكل صفوفنا تحمل طوابع زمنية **مستقبلية**
+    (30 نوفمبر – 8 ديسمبر بينما الساعة 27 نوفمبر). استعلام بلا حد أعلى
+    (`> now - 10min`) التقط 674,137 صفاً «مستقبلاً» وسمّاها قياساً حياً
+    بثقة 0.9 — وهي تنبؤات. النتيجة: المحرّك يعلن «أعرف الآن» بينما يقرأ
+    جدولاً نموذجياً متنكّراً.
+
+    **ولماذا `forecast` مستبعد صراحةً:** حتى لو وقع طابع زمني في الماضي،
+    الصف الذي وسمه الجمع `forecast` ليس قياساً آنياً بل تنبؤاً لذلك الوقت.
+    خلطه بالقياس الحي يجعل المنتج يكذب على نفسه.
     """
     with session_scope() as s:
         rows = s.execute(
@@ -166,11 +178,13 @@ def fetch_live_speeds_bulk(now: datetime, max_age_min: float = 10.0) -> dict[int
                 """
                 SELECT DISTINCT ON (segment_id) segment_id, speed_kmh
                 FROM samples
-                WHERE ts_utc > :t AND speed_kmh IS NOT NULL AND speed_kmh > 0
+                WHERE ts_utc > :from_t AND ts_utc <= :now
+                  AND speed_kmh IS NOT NULL AND speed_kmh > 0
+                  AND (raw_ref IS NULL OR raw_ref NOT LIKE '%forecast%')
                 ORDER BY segment_id, ts_utc DESC
                 """
             ),
-            {"t": now - timedelta(minutes=max_age_min)},
+            {"from_t": now - timedelta(minutes=max_age_min), "now": now},
         ).all()
     return {int(r[0]): float(r[1]) for r in rows}
 
@@ -537,9 +551,10 @@ def weather_factor_now(now: datetime | None = None) -> float:
         v = s.execute(
             text(
                 "SELECT factor FROM weather_obs "
-                "WHERE ts_utc > :t ORDER BY ts_utc DESC LIMIT 1"
+                "WHERE ts_utc > :t AND ts_utc <= :now "
+                "ORDER BY ts_utc DESC LIMIT 1"
             ),
-            {"t": now - timedelta(hours=2)},
+            {"t": now - timedelta(hours=2), "now": now},
         ).scalar()
     return float(v) if v is not None else 1.0
 

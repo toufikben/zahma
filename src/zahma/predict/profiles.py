@@ -24,6 +24,7 @@ def rebuild(
     verbose: bool = True,
     sources: tuple[str, ...] | None = None,
     exclude_days: tuple[date, ...] | None = None,
+    min_samples: int = MIN_SAMPLES,
 ) -> dict:
     """يعيد بناء speed_profiles من samples.
 
@@ -34,6 +35,13 @@ def rebuild(
     `("mapbox",)` يبني الملفات من بيانات حقيقية فقط — وهذا مهم قبل
     الإطلاق: خلط بيانات `mock` (منحنى رياضي مصطنع) مع قياسات حقيقية
     يجعل الملفات تبدو أفضل مما هي، ويُخفي فجوات التغطية الحقيقية.
+
+    `min_samples`: الحد الأدنى لعينات (مقطع × نوع يوم × شريحة). الافتراضي
+    3 — يحمي من ملف مبني على عيّنة واحدة **صاخبة**. لكن هذا الحماية تفترض
+    ضجيجاً، وجدول Mapbox بلا ضجيج: يعيد رقماً واحداً ثابتاً لكل (مقطع،
+    شريحة، يوم). فيه يوم واحد من الجمعة يعطي n=1 لكل تركيبة — وهو
+    **اكتمال** لا نقص. تمرير 1 يبني ملفات الجمعة والسبت، ويجب أن يقرنه
+    القارئ بعلم أن n=1.
     """
     t0 = datetime.now(UTC)
 
@@ -92,7 +100,7 @@ def rebuild(
                 COUNT(*) AS n
             FROM tagged
             GROUP BY segment_id, d_type, bucket_15m, is_ramadan, is_school
-            HAVING COUNT(*) >= {MIN_SAMPLES}
+            HAVING COUNT(*) >= {min_samples}
         )
         INSERT INTO speed_profiles
           (segment_id, day_type, bucket_15m, is_ramadan, is_school,
@@ -115,11 +123,75 @@ def rebuild(
         s.execute(sql, params)
         n = s.execute(text("SELECT COUNT(*) FROM speed_profiles")).scalar()
         n_seg = s.execute(text("SELECT COUNT(DISTINCT segment_id) FROM speed_profiles")).scalar()
+        # تقرير من **حُذف** لا من بقي. الحد الأدنى MIN_SAMPLES صامت بطبيعته:
+        # يمرّ يوم كامل بلا ملف ولا يقول شيئاً. قياس حقيقي: الجمعة والسبت
+        # لهما 77,332 و68,811 تركيبة بمتوسط عينة **واحدة** لكل تركيبة،
+        # فحُذفت كلها. بلا هذا التقرير يبدو الأمر «لا بيانات» بينما
+        # البيانات موجودة والحد هو السبب.
+        dropped = s.execute(
+            text(
+                f"""
+                WITH tagged AS (
+                    SELECT
+                        s.segment_id,
+                        s.speed_kmh,
+                        CASE WHEN c.is_ramadan THEN 'RAMADAN' ELSE c.day_type END AS d_type,
+                        c.is_ramadan,
+                        c.is_school,
+                        ((EXTRACT(HOUR FROM (s.ts_utc AT TIME ZONE 'Africa/Algiers')) * 4)
+                         + FLOOR(EXTRACT(MINUTE FROM (s.ts_utc AT TIME ZONE 'Africa/Algiers')) / 15))::smallint
+                         AS bucket_15m
+                    FROM samples s
+                    JOIN calendar_days c
+                      ON c.day_local = (s.ts_utc AT TIME ZONE 'Africa/Algiers')::date
+                    WHERE s.speed_kmh IS NOT NULL
+                      AND s.speed_kmh > 0
+                      AND s.speed_kmh <= 200
+                      {src_clause}
+                )
+                SELECT d_type,
+                       COUNT(*) AS combos,
+                       ROUND(AVG(n), 2) AS avg_n,
+                       COUNT(*) FILTER (WHERE n < {min_samples}) AS below_min,
+                       COUNT(DISTINCT segment_id) AS segs
+                FROM (
+                    SELECT d_type, segment_id, bucket_15m, is_ramadan, is_school,
+                           COUNT(*) AS n
+                    FROM tagged
+                    GROUP BY 1, 2, 3, 4, 5
+                ) x
+                GROUP BY 1
+                ORDER BY 1
+                """
+            ),
+            params,
+        ).all()
 
     elapsed = (datetime.now(UTC) - t0).total_seconds()
-    out = {"profiles": int(n or 0), "segments": int(n_seg or 0), "seconds": round(elapsed, 1)}
+    out = {
+        "profiles": int(n or 0),
+        "segments": int(n_seg or 0),
+        "seconds": round(elapsed, 1),
+        "dropped": [
+            {
+                "day_type": str(dt),
+                "combos": int(combos),
+                "avg_samples": float(avg_n or 0),
+                "below_min": int(below or 0),
+                "segments": int(segs or 0),
+            }
+            for dt, combos, avg_n, below, segs in dropped
+        ],
+    }
     if verbose:
         print(f"[profiles] {out['profiles']:,} rows, {out['segments']:,} segments, {out['seconds']}s")
+        for d in out["dropped"]:
+            if d["below_min"] and d["below_min"] == d["combos"]:
+                print(
+                    f"  ! {d['day_type']}: كل الـ{d['combos']:,} تركيبة تحت "
+                    f"الحد ({min_samples}) — متوسط {d['avg_samples']:.2f} عينة. "
+                    f"هذا اليوم بلا ملف تعريف."
+                )
     return out
 
 
