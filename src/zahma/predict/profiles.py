@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import text
 
@@ -20,7 +20,11 @@ from zahma.db import session_scope
 MIN_SAMPLES = 3
 
 
-def rebuild(verbose: bool = True, sources: tuple[str, ...] | None = None) -> dict:
+def rebuild(
+    verbose: bool = True,
+    sources: tuple[str, ...] | None = None,
+    exclude_days: tuple[date, ...] | None = None,
+) -> dict:
     """يعيد بناء speed_profiles من samples.
 
     يتم كل شيء في Postgres — أسرع بكثير من المعالجة في Python،
@@ -42,6 +46,15 @@ def rebuild(verbose: bool = True, sources: tuple[str, ...] | None = None) -> dic
         # عيب صامت: الملفات تُبنى فارغة ويبدو أن لا بيانات.
         src_clause = "AND s.source::text = ANY(CAST(:sources AS text[]))"
         params["sources"] = list(sources)
+    if exclude_days:
+        # حجز يوم للتقييم: نبني الملفات من بقية الأيام ثم نقيس دقتها
+        # على اليوم المحجوز. بلا هذا، التقييم دائري — نقارن البيانات
+        # بنفسها فنحصل على خطأ شبه صفر لا يعني شيئاً.
+        src_clause += (
+            " AND (s.ts_utc AT TIME ZONE 'Africa/Algiers')::date <> ALL("
+            "CAST(:excl AS date[]))"
+        )
+        params["excl"] = list(exclude_days)
 
     sql = text(
         f"""
@@ -110,7 +123,9 @@ def rebuild(verbose: bool = True, sources: tuple[str, ...] | None = None) -> dic
     return out
 
 
-def rebuild_class_profiles(verbose: bool = True) -> dict:
+def rebuild_class_profiles(
+    verbose: bool = True, sources: tuple[str, ...] | None = None
+) -> dict:
     """أولوية صنف الطريق — من المقاطع المقيسة إلى كل مقاطع الصنف.
 
     لماذا هذا ضروري: المسار داخل المدينة يمرّ عبر residential/tertiary
@@ -123,10 +138,19 @@ def rebuild_class_profiles(verbose: bool = True) -> dict:
 
     الحد الأدنى: 2 مقطع و5 عينات، وإلا لا نُنشئ صفاً — الصمت أفضل من
     أولوية مبنية على عينة واحدة.
+
+    `sources`: مثل `rebuild` — `("mapbox",)` يبني من بيانات حقيقية فقط.
     """
     t0 = datetime.now(UTC)
+
+    src_clause = ""
+    params: dict = {}
+    if sources:
+        src_clause = "AND s.source::text = ANY(CAST(:sources AS text[]))"
+        params["sources"] = list(sources)
+
     sql = text(
-        """
+        f"""
         WITH tagged AS (
             SELECT
                 s.segment_id,
@@ -146,6 +170,7 @@ def rebuild_class_profiles(verbose: bool = True) -> dict:
               AND s.speed_kmh > 0
               AND s.speed_kmh <= 200
               AND sg.road_class IS NOT NULL
+              {src_clause}
         ),
         profiled AS (
             SELECT
@@ -181,7 +206,7 @@ def rebuild_class_profiles(verbose: bool = True) -> dict:
 
     with session_scope() as s:
         s.execute(text("TRUNCATE class_profiles"))
-        s.execute(sql)
+        s.execute(sql, params)
         n = s.execute(text("SELECT COUNT(*) FROM class_profiles")).scalar()
         n_cls = s.execute(
             text("SELECT COUNT(DISTINCT road_class) FROM class_profiles")

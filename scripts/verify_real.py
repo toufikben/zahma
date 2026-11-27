@@ -49,8 +49,9 @@ def profile_report() -> dict:
                 text(
                     """
                     SELECT count(*) AS rows,
-                           count(DISTINCT segment_id) AS segments,
-                           count(DISTINCT road_class) AS classes
+                           coalesce(max(segments_n), 0) AS segments,
+                           count(DISTINCT road_class) AS classes,
+                           coalesce(sum(samples_n), 0) AS samples
                     FROM class_profiles
                     """
                 )
@@ -83,8 +84,8 @@ def main() -> int:
 
     print("\n── ملفات تعريف الأصناف")
     print(
-        f"   {prof['rows']:,} صفاً، {prof['segments']:,} مقطع، "
-        f"{prof['classes']} صنف طريق"
+        f"   {prof['rows']:,} صفاً، {prof['classes']} صنف طريق، "
+        f"{prof['samples']:,} عينة داخلة"
     )
 
     print("\n── منحنى الانطلاق (باب الزوار ← الوسط)")
