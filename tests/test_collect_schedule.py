@@ -96,25 +96,40 @@ class TestCollectHoursCoverFullDay:
         """القائمة الافتراضية تحوي ساعات ليلية.
 
         قبل الإصلاح توقفت عند 21:00، فلم تُقس أسرع ساعات اليوم إطلاقاً.
+
+        نتحقق من الثابت نفسه لا من نص الدالة: بعد استخراج القائمة إلى
+        `DEFAULT_COLLECT_HOURS` (مصدر واحد للحقيقة) لم يبقَ نص داخل
+        الدالة، والاختبار القديم كان يفحص النص فيفشل بلا عيب حقيقي.
+        """
+        from zahma.cli import DEFAULT_COLLECT_HOURS
+
+        assert "23:59" in DEFAULT_COLLECT_HOURS
+        assert "03:00" in DEFAULT_COLLECT_HOURS
+
+    def test_default_hours_do_not_waste_quota_on_flat_night(self):
+        """ساعتان ليلاً، لا سبع. المنحنى مسطّح فلا معلومة إضافية."""
+        from zahma.cli import DEFAULT_COLLECT_HOURS
+
+        night_hours = [
+            h for h in DEFAULT_COLLECT_HOURS if int(h.split(":")[0]) >= 23
+            or int(h.split(":")[0]) < 5
+        ]
+        assert len(night_hours) <= 3, (
+            f"{len(night_hours)} ساعة ليلية — المنحنى مسطّح (مدى 4.2 كم/س)، "
+            "فكل ساعة إضافية حصة بلا معلومة"
+        )
+
+    def test_collect_real_uses_the_shared_constant(self):
+        """`collect-real` يقرأ الثابت، لا نسخة محلية منه.
+
+        لو نسخ القائمة داخلياً لاختلفت عن قائمة الكشف، وكشفنا فجوات
+        كاذبة — وهذا وقع فعلاً (95 «فجوة» معظمها ساعات غير مخطّطة).
         """
         import inspect
 
         from zahma import cli
 
         src = inspect.getsource(cli.collect_real)
-        assert '"23:59"' in src, "لا ساعة ليلية في القائمة الافتراضية"
-        assert '"03:00"' in src
-
-    def test_default_hours_do_not_waste_quota_on_flat_night(self):
-        """ساعتان ليلاً، لا سبع. المنحنى مسطّح فلا معلومة إضافية."""
-        import inspect
-        import re
-
-        from zahma import cli
-
-        src = inspect.getsource(cli.collect_real)
-        night_hours = re.findall(r'"(2[3]|0[0-5]):\d\d"', src)
-        assert len(night_hours) <= 3, (
-            f"{len(night_hours)} ساعة ليلية — المنحنى مسطّح (مدى 4.2 كم/س)، "
-            "فكل ساعة إضافية حصة بلا معلومة"
+        assert "DEFAULT_COLLECT_HOURS" in src, (
+            "collect-real لا يستخدم القائمة المشتركة — ستنشأ نسخة ثانية"
         )

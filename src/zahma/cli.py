@@ -15,6 +15,26 @@ from zahma.config import get_settings
 app = typer.Typer(help="زحمة — أدوات الجمع والتحقق", no_args_is_help=True)
 console = Console()
 
+# الساعات الافتراضية للجمع — **مصدر واحد للحقيقة**.
+#
+# `gaps` يقرأ هذه القائمة ليقرّر أي ساعة «مخطّطة»، و`collect-real` يقرأها
+# ليقرّر أي ساعة يجمع. لو نُسخت في مكانين لاختلفتا، وكشفنا فجوات لا وجود
+# لها (وهو ما حدث فعلاً في النسخة الأولى: 95 «فجوة» معظمها ساعات لم
+# نخطط لها).
+#
+# **تغطي 24 ساعة، لا 05:30–21:00 فقط.** القياس المباشر أثبت أن 04:00 =
+# 68.2 كم/س مقابل 17:00 = 42.5 — أي أن القائمة القديمة كانت تجهل 60% من
+# مدى اليوم، والمنحنى يبدأ من 14.9 دقيقة بدل 12.6.
+#
+# **وساعتان ليلاً لا سبع:** المنحنى مسطّح بين 23:59 و05:00 (64 → 68 →
+# 66، مدى 4.2 كم/س). سبع ساعات = 7× الحصة مقابل صفر معلومة إضافية.
+DEFAULT_COLLECT_HOURS: tuple[str, ...] = (
+    "05:30", "06:30", "07:00", "07:30", "08:00", "08:30",
+    "09:00", "10:00", "12:00", "14:00", "16:30", "17:00",
+    "17:30", "18:00", "18:30", "19:00", "21:00",
+    "23:59", "03:00",
+)
+
 
 @app.command("init-db")
 def init_db() -> None:
@@ -138,22 +158,10 @@ def collect_real(
     from datetime import date as _date
 
     start = date.fromisoformat(day) if day else _date.today()
-    # الساعات الافتراضية تغطي 24 ساعة، لا 05:30–21:00 فقط.
-    #
-    # **العيب الذي أصلحه هذا:** القائمة كانت تتوقف عند 21:00، فلم نُقس
-    # أسرع ساعات اليوم إطلاقاً. القياس المباشر أثبت أن 04:00 = 68.2 كم/س
-    # مقابل 17:00 = 42.5 — أي أننا كنا نجهل 60% من مدى اليوم، والمنحنى
-    # المعروض للمستخدم كان يبدأ من 14.9 دقيقة بدل 12.6.
-    #
-    # **ولماذا ساعتان ليلاً لا سبع:** المنحنى مسطّح بين 23:59 و05:00
-    # (64 → 68 → 66، مدى 4.2 كم/س). سبع ساعات تعني 7× الحصة مقابل صفر
-    # معلومة إضافية. الساعتان تحصران النطاق كله.
-    hour_list = hours.split(",") if hours else [
-        "05:30", "06:30", "07:00", "07:30", "08:00", "08:30",
-        "09:00", "10:00", "12:00", "14:00", "16:30", "17:00",
-        "17:30", "18:00", "18:30", "19:00", "21:00",
-        "23:59", "03:00",
-    ]
+    # القائمة الافتراضية في `DEFAULT_COLLECT_HOURS` — مصدر واحد للحقيقة،
+    # لأن مهمة الكشف عن الفجوات تقرأ نفس القائمة. لو نسخت هنا لاختلفت
+    # المهمتان وكشفنا فجوات لا وجود لها.
+    hour_list = hours.split(",") if hours else list(DEFAULT_COLLECT_HOURS)
 
     total_segs = 0
     total_routes = 0
@@ -176,6 +184,119 @@ def collect_real(
         f"\n[bold]الإجمالي:[/bold] {total_segs:,} قياس مقطع، "
         f"{total_routes:,} مسار"
     )
+
+
+@app.command("gaps")
+def gaps(
+    days: int = typer.Option(9, help="عدد الأيام للفحص"),
+    fix: bool = typer.Option(False, help="املأ الفجوات فوراً"),
+) -> None:
+    """يكشف الساعات التي **خططنا** لجمعها ولم تُجمع — ثم يملؤها إن أردت.
+
+    **لماذا هذا الأمر ضروري:** قلنا «التشغيل الفائت يُملأ»، لكن القدرة
+    على الملء بلا كشف لا قيمة لها — لا أحد يعرف أي ساعة فاتت. cron على
+    GitHub يُسقط تشغيلات بصمت (لا تشغيل فاشل، لا إشعار)، فبلا هذا
+    الأمر تتراكم فجوات لا يراها أحد.
+
+    **تصحيح مهم في النسخة الأولى من هذا الأمر:** كان يفحص 24 ساعة
+    ويُبلّغ عن 95 «فجوة»، بينما معظمها ساعات لم نخطط لها أصلاً (11:00،
+    13:00، 15:00 ليست في قائمة الجمع الافتراضية). التحذير الكاذب أسوأ
+    من الصمت: يُعلّم المستخدم تجاهل الأمر. النسخة الصحيحة تقارن
+    بجدولنا الفعلي لا باليوم الكامل.
+
+    **الحد الذي يُميّز الفجوة الحقيقية:** الساعة مخطّطة + عدد صفوفها
+    أقل من نصف الوسيط. الأول يعني أن cron لم يعمل، والثاني يعني أنه
+    عمل جزئياً (انقطاع في المنتصف).
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import text as sql_text
+
+    from zahma.db import session_scope
+
+    # الساعات المخطّطة، مستخرجة من نفس مصدر الحقيقة الذي يستخدمه الجمع.
+    planned = _planned_hours()
+
+    with session_scope() as ss:
+        rows = ss.execute(
+            sql_text(
+                """
+                SELECT date_trunc('hour', ts_bucket AT TIME ZONE 'Africa/Algiers') AS h,
+                       count(*) AS n
+                FROM samples
+                WHERE source::text = 'mapbox'
+                  AND ts_bucket >= now() - make_interval(days => :d)
+                GROUP BY 1 ORDER BY 1
+                """
+            ),
+            {"d": days},
+        ).all()
+
+    counts = {r[0]: int(r[1]) for r in rows}
+    if not counts:
+        console.print("[red]لا بيانات إطلاقاً[/red]")
+        raise typer.Exit(code=1)
+
+    values = sorted(counts.values())
+    median = values[len(values) // 2]
+    threshold = median / 2
+
+    start = max(counts).replace(minute=0, second=0, microsecond=0) - timedelta(days=days)
+    missing: list[str] = []
+    partial: list[str] = []
+    cur = start
+    while cur <= max(counts):
+        # نقيس فقط الساعات التي خططنا لها. الساعة غير المخطّطة ليست
+        # فجوة بل قرار.
+        if cur.hour in planned:
+            n = counts.get(cur, 0)
+            if n == 0:
+                missing.append(cur.strftime("%Y-%m-%dT%H:%M"))
+            elif n < threshold:
+                partial.append(f"{cur:%Y-%m-%dT%H:%M} ({n})")
+        cur += timedelta(hours=1)
+
+    console.print(
+        f"الساعات المخطّطة: {sorted(planned)} — الوسيط {median:,} صف/ساعة"
+    )
+    if not missing and not partial:
+        console.print("[green]لا فجوات — كل ساعة مخطّطة لها بيانات كافية[/green]")
+        return
+
+    if missing:
+        console.print(f"\n[yellow]ساعات مخطّطة مفقودة ({len(missing)}):[/yellow]")
+        for m in missing:
+            console.print(f"  {m}")
+    if partial:
+        console.print(f"\n[yellow]ساعات ناقصة ({len(partial)}):[/yellow]")
+        for p in partial:
+            console.print(f"  {p}")
+
+    if not fix:
+        console.print("\n[dim]للملء: zahma gaps --fix[/dim]")
+        raise typer.Exit(code=1)
+
+    # الملء: نفس دالة الجمع، بتواريخ ماضية. المصدر لا يفرّق بين ماضٍ
+    # ومستقبل (مقاس: نفس الرقم بعد سنة)، فالملء استدعاء عادي.
+    from zahma.collect.match import collect
+
+    filled = 0
+    for slot in missing + [p.split(" ")[0] for p in partial]:
+        day, hhmm = slot.split("T")
+        r = collect(limit_pairs=20, depart_at=f"{day}T{hhmm}")
+        filled += r.get("segments", 0)
+        console.print(f"  ملء {slot}: {r.get('segments', 0)} مقطع")
+    console.print(f"\n[green]مُلئ {filled:,} قياساً[/green]")
+
+
+def _planned_hours() -> set[int]:
+    """الساعات التي يخطّط الجمع الافتراضي لتغطيتها.
+
+    مصدر واحد للحقيقة: نقرأ `DEFAULT_COLLECT_HOURS` نفسها التي يقرأها
+    `collect-real`، فلا تختلف مهمة الكشف عن مهمة الجمع (وإلا كشفنا عن
+    فجوات لا وجود لها، أو أخفينا فجوات حقيقية).
+    """
+    return {int(hh.split(":")[0]) for hh in DEFAULT_COLLECT_HOURS}
 
 
 @app.command("rebuild-profiles")
