@@ -184,7 +184,18 @@ def fetch_class_speeds_bulk(
     نقيسها مباشرة. بلا هذا، كل مقطع residential/tertiary يرجع إلى
     السرعة الحرة الثابتة، فيصبح المنحنى خطاً مستقيماً.
 
-    التراجع: (يوم، شريحة) ← (يوم، أي شريحة) ← (يوم عمل، شريحة).
+    **الاستيفاء الخطي بدل «أقرب شريحة»** — وهذا إصلاح عيب حقيقي:
+
+    الشرائح تُبنى من عينات فعلية، والعينات ليست في كل شريحة (جمع كل
+    60 دقيقة يعطي الشرائح 3، 7، 11... فقط). «أقرب شريحة» يعني أن
+    الشريحة 30 تختار بين 27 و35 — والمسافة متساوية، فيختار Postgres
+    أحدهما عشوائياً. النتيجة المقاسة في CI: منحنى يتراوح صعوداً وهبوطاً
+    (23.2 ← 11.9 ← 20.5 ← 11.9)، أي أن المستخدم يرى «اخرج في 08:00
+    أسرع من 08:30» — تناقض يهدم الثقة في كل رقم آخر.
+
+    الحل: نأخذ أقرب شريحة **قبل** وأقرب شريحة **بعد**، ونستوفي بينهما
+    خطياً بوزن المسافة. السرعة تتغيّر بسلاسة في الواقع، والاستيفاء يعكس
+    ذلك. عند غياب أحد الطرفين نستخدم المتوفر.
     """
     with session_scope() as s:
         rows = s.execute(
@@ -194,27 +205,45 @@ def fetch_class_speeds_bulk(
                     SELECT road_class, p50_speed FROM class_profiles
                     WHERE day_type = :d AND bucket_15m = :b AND is_ramadan = :r
                 ),
-                near AS (
-                    SELECT DISTINCT ON (road_class) road_class, p50_speed
+                before AS (
+                    SELECT DISTINCT ON (road_class) road_class, p50_speed, bucket_15m
                     FROM class_profiles
-                    WHERE day_type = :d AND bucket_15m BETWEEN :b1 AND :b2
-                    ORDER BY road_class, abs(bucket_15m - :b)
+                    WHERE day_type = :d AND bucket_15m <= :b AND is_ramadan = :r
+                    ORDER BY road_class, bucket_15m DESC
+                ),
+                after AS (
+                    SELECT DISTINCT ON (road_class) road_class, p50_speed, bucket_15m
+                    FROM class_profiles
+                    WHERE day_type = :d AND bucket_15m >= :b AND is_ramadan = :r
+                    ORDER BY road_class, bucket_15m ASC
+                ),
+                interp AS (
+                    SELECT
+                        COALESCE(bf.road_class, af.road_class) AS road_class,
+                        CASE
+                            WHEN bf.p50_speed IS NULL THEN af.p50_speed
+                            WHEN af.p50_speed IS NULL THEN bf.p50_speed
+                            WHEN bf.bucket_15m = af.bucket_15m THEN bf.p50_speed
+                            ELSE bf.p50_speed
+                                 + (af.p50_speed - bf.p50_speed)
+                                   * (:b - bf.bucket_15m)::double precision
+                                   / (af.bucket_15m - bf.bucket_15m)
+                        END AS v
+                    FROM before bf
+                    FULL OUTER JOIN after af ON af.road_class = bf.road_class
                 ),
                 work AS (
                     SELECT road_class, p50_speed FROM class_profiles
                     WHERE day_type = 'WORKDAY' AND bucket_15m = :b
                 )
-                SELECT COALESCE(e.road_class, n.road_class, w.road_class) AS rc,
-                       COALESCE(e.p50_speed, n.p50_speed, w.p50_speed) AS v
+                SELECT COALESCE(e.road_class, i.road_class, w.road_class) AS rc,
+                       COALESCE(e.p50_speed, i.v, w.p50_speed) AS v
                 FROM exact e
-                FULL OUTER JOIN near n ON n.road_class = e.road_class
-                FULL OUTER JOIN work w ON w.road_class = COALESCE(e.road_class, n.road_class)
+                FULL OUTER JOIN interp i ON i.road_class = e.road_class
+                FULL OUTER JOIN work w ON w.road_class = COALESCE(e.road_class, i.road_class)
                 """
             ),
-            {
-                "d": dtype, "b": b, "b1": max(0, b - 1), "b2": min(95, b + 1),
-                "r": flags["is_ramadan"],
-            },
+            {"d": dtype, "b": b, "r": flags["is_ramadan"]},
         ).all()
     return {str(r[0]): float(r[1]) for r in rows if r[0] is not None and r[1] is not None}
 
@@ -236,25 +265,50 @@ def fetch_profile_speeds_bulk(
                     WHERE day_type = :d AND bucket_15m = :b
                       AND is_ramadan = :r AND is_school = :sc
                 ),
-                near AS (
-                    SELECT DISTINCT ON (segment_id) segment_id, p50_speed
+                before AS (
+                    SELECT DISTINCT ON (segment_id) segment_id, p50_speed, bucket_15m
                     FROM speed_profiles
-                    WHERE day_type = :d AND bucket_15m BETWEEN :b1 AND :b2
-                    ORDER BY segment_id, abs(bucket_15m - :b)
+                    WHERE day_type = :d AND bucket_15m <= :b
+                    ORDER BY segment_id, bucket_15m DESC
+                ),
+                after AS (
+                    SELECT DISTINCT ON (segment_id) segment_id, p50_speed, bucket_15m
+                    FROM speed_profiles
+                    WHERE day_type = :d AND bucket_15m >= :b
+                    ORDER BY segment_id, bucket_15m ASC
+                ),
+                interp AS (
+                    -- استيفاء خطي بين أقرب شريحة قبل وأقرب شريحة بعد.
+                    -- «أقرب شريحة» بلا استيفاء يعطي نتائج متذبذبة عند
+                    -- تساوي المسافة (شريحة 30 بين 27 و35)، فيصبح منحنى
+                    -- الانطلاق صعوداً وهبوطاً — عيب مقاس في CI.
+                    SELECT
+                        COALESCE(bf.segment_id, af.segment_id) AS segment_id,
+                        CASE
+                            WHEN bf.p50_speed IS NULL THEN af.p50_speed
+                            WHEN af.p50_speed IS NULL THEN bf.p50_speed
+                            WHEN bf.bucket_15m = af.bucket_15m THEN bf.p50_speed
+                            ELSE bf.p50_speed
+                                 + (af.p50_speed - bf.p50_speed)
+                                   * (:b - bf.bucket_15m)::double precision
+                                   / (af.bucket_15m - bf.bucket_15m)
+                        END AS p50_speed
+                    FROM before bf
+                    FULL OUTER JOIN after af ON af.segment_id = bf.segment_id
                 ),
                 work AS (
                     SELECT segment_id, p50_speed FROM speed_profiles
                     WHERE day_type = 'WORKDAY' AND bucket_15m = :b
                 )
-                SELECT COALESCE(e.segment_id, n.segment_id, w.segment_id) AS sid,
-                       COALESCE(e.p50_speed, n.p50_speed, w.p50_speed) AS v
+                SELECT COALESCE(e.segment_id, i.segment_id, w.segment_id) AS sid,
+                       COALESCE(e.p50_speed, i.p50_speed, w.p50_speed) AS v
                 FROM exact e
-                FULL OUTER JOIN near n ON n.segment_id = e.segment_id
-                FULL OUTER JOIN work w ON w.segment_id = COALESCE(e.segment_id, n.segment_id)
+                FULL OUTER JOIN interp i ON i.segment_id = e.segment_id
+                FULL OUTER JOIN work w ON w.segment_id = COALESCE(e.segment_id, i.segment_id)
                 """
             ),
             {
-                "d": dtype, "b": b, "b1": max(0, b - 1), "b2": min(95, b + 1),
+                "d": dtype, "b": b,
                 "r": flags["is_ramadan"], "sc": flags["is_school"],
             },
         ).all()

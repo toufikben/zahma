@@ -135,7 +135,7 @@ jobs:
 
       - name: Departure curve must vary
         run: |
-          # الحارس الأهم: إن عاد المنحنى مسطّحاً فالمنتج لا يعرف الزحمة.
+          # الحارس الأهم: إن عاد المنحنى مسطّحاً أو متذبذباً فالمنتج لا يعرف الزحمة.
           python - <<'PY'
           from datetime import datetime, UTC
           from zahma.predict.engine import departure_curve
@@ -147,13 +147,27 @@ jobs:
           )
           assert curve, "empty departure curve"
           durs = [o.duration_s / 60 for o in curve]
-          spread = max(durs) - min(durs)
           print(f"curve: {[round(d, 1) for d in durs]}")
+          spread = max(durs) - min(durs)
           print(f"spread: {spread:.1f} min")
+
+          # 1. يجب أن يتغيّر — منحنى مسطّح يعني أننا لا نعرف الزحمة.
           assert spread > 2.0, (
               f"departure curve is flat ({spread:.1f} min) — "
               "class prior or profiles are not working"
           )
+
+          # 2. يجب ألا يتذبذب. صعود وهبوط متكرر يعني أن الاستيفاء
+          #    بين الشرائح معطوب، فيرى المستخدم «08:00 أسرع من 08:30».
+          ups = sum(1 for a, b in zip(durs, durs[1:]) if b > a + 0.5)
+          downs = sum(1 for a, b in zip(durs, durs[1:]) if b < a - 0.5)
+          print(f"ups: {ups}, downs: {downs}")
+          assert not (ups > 1 and downs > 1), (
+              f"departure curve oscillates (ups={ups}, downs={downs}) — "
+              "interpolation between time buckets is broken"
+          )
+
+          # 3. الثقة يجب أن تسمح بالتوصية.
           assert curve[0].confidence >= 0.3, (
               f"confidence too low: {curve[0].confidence}"
           )

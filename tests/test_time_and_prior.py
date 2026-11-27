@@ -162,3 +162,91 @@ class TestClassPriorChain:
         )
         assert est.speed_kmh < 60.0
         assert est.duration_s > 60.0  # أطول من دقيقة على 1 كم بسرعة 60
+
+
+class TestInterpolationMonotonic:
+    """الاستيفاء بين الشرائح لا يُنتج منحنى متذبذباً.
+
+    العيب المقاس في CI: العينات على الشرائح 3، 7، 11... (جمع كل ساعة)،
+    والشرائح بينها فارغة. «أقرب شريحة» (±1) عند تساوي المسافة يختار
+    عشوائياً، فيظهر: 23.2 ← 11.9 ← 20.5 ← 11.9. المستخدم يقرأ ذلك
+    كعطل، ويخسر الثقة في كل رقم آخر نعرضه.
+
+    هذه الاختبارات تتحقق من الاستيفاء حسابياً بلا قاعدة بيانات، ثم
+    تتحقق من الرتابة على البيانات الحقيقية إن وُجدت.
+    """
+
+    @staticmethod
+    def _interp(before: tuple[int, float] | None, after: tuple[int, float] | None, b: int):
+        """نفس صيغة SQL — لاختبار السلوك بلا قاعدة بيانات."""
+        if before is None and after is None:
+            return None
+        if before is None:
+            return after[1]
+        if after is None:
+            return before[1]
+        bb, bv = before
+        ab, av = after
+        if bb == ab:
+            return bv
+        return bv + (av - bv) * (b - bb) / (ab - bb)
+
+    def test_midpoint_between_two_buckets(self):
+        """شريحة 31 هي منتصف 27 و35 → متوسط السرعتين بالضبط."""
+        assert self._interp((27, 20.0), (35, 40.0), 31) == pytest.approx(30.0)
+
+    def test_quarter_point(self):
+        """شريحة 29: 2 من 8 بين 27 و35 → 20 + 20×0.25 = 25."""
+        assert self._interp((27, 20.0), (35, 40.0), 29) == pytest.approx(25.0)
+
+    def test_closer_to_before(self):
+        """شريحة 28 أقرب إلى 27 → أقرب إلى 20."""
+        v = self._interp((27, 20.0), (35, 40.0), 28)
+        assert 20.0 < v < 30.0
+
+    def test_only_before_available(self):
+        """نهاية اليوم: لا شريحة بعد → نستخدم ما قبل."""
+        assert self._interp((91, 55.0), None, 94) == pytest.approx(55.0)
+
+    def test_only_after_available(self):
+        """بداية اليوم: لا شريحة قبل → نستخدم ما بعد."""
+        assert self._interp(None, (3, 58.0), 0) == pytest.approx(58.0)
+
+    def test_identical_buckets_no_division_by_zero(self):
+        """شريحة مطابقة للطرفين → قيمة مباشرة، لا قسمة على صفر."""
+        assert self._interp((30, 25.0), (30, 25.0), 30) == pytest.approx(25.0)
+
+    def test_monotonic_sequence_stays_monotonic(self):
+        """سلسلة متنازلة تُستوفى تبقى متنازلة — لا انقلاب.
+
+        هذا هو جوهر الحماية: بين أي نقطتين مقاستين، الاستيفاء خطي،
+        فلا يمكن أن ينتج ارتفاعاً في منتصف هبوط.
+        """
+        measured = [(27, 40.0), (35, 30.0), (43, 22.0)]
+        out = []
+        for b in range(27, 44):
+            before = max((m for m in measured if m[0] <= b), default=None)
+            after = min((m for m in measured if m[0] >= b), default=None)
+            out.append(self._interp(before, after, b))
+        for a, c in zip(out, out[1:], strict=False):
+            assert c <= a + 1e-9, f"interpolation reversed: {out}"
+
+    def test_real_curve_is_monotonic_if_data_present(self):
+        """على البيانات الحقيقية: منحنى 07:30–09:30 لا يتذبذب."""
+        from zahma.predict.engine import departure_curve
+
+        when = datetime(2026, 11, 29, 6, 30, tzinfo=UTC)
+        try:
+            curve = departure_curve(
+                36.7167, 3.1833, 36.7705, 3.0589,
+                now=when, horizon_min=120, step_min=30,
+            )
+        except Exception:  # noqa: BLE001 — بلا قاعدة بيانات
+            pytest.skip("database not available")
+        if not curve:
+            pytest.skip("no route — network not built")
+
+        durs = [o.duration_s / 60 for o in curve]
+        ups = sum(1 for a, b in zip(durs, durs[1:], strict=False) if b > a + 0.5)
+        downs = sum(1 for a, b in zip(durs, durs[1:], strict=False) if b < a - 0.5)
+        assert not (ups > 1 and downs > 1), f"oscillating curve: {durs}"
