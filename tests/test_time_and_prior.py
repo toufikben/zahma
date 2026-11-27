@@ -164,6 +164,88 @@ class TestClassPriorChain:
         assert est.duration_s > 60.0  # أطول من دقيقة على 1 كم بسرعة 60
 
 
+class TestRatioPrior:
+    """نسبة الأداء تتفوّق على الوسيط المطلق — وهذا مُقاس لا مُفترض.
+
+    الخلفية: الوسيط المطلق لكل (صنف، شريحة) يخلط بين مقطع سرعته الحرة
+    40 وآخر 60. النسبة (الفعلية ÷ الحرة) بلا وحدة فتنطبق على أي مقطع
+    عرفنا سرعته الحرة. على 180,940 قياساً على مقاطع لم تُقس:
+      مطلق: وسيط 18.7%، p90 83.9%، تحيز +6.9%
+      نسبة: وسيط 17.7%، p90 59.2%، تحيز -0.4%
+    """
+
+    FLAGS = {"is_ramadan": False, "is_school": True, "is_summer": False}
+
+    def _est(self, free_kmh: float, ratio_map: dict, class_map=None):
+        from zahma.predict.engine import estimate_segment
+
+        seg = {
+            "seg_id": 999_999_999,
+            "length_m": 1000.0,
+            "speed_free_kmh": free_kmh,
+            "road_class": "primary",
+        }
+        return estimate_segment(
+            seg,
+            when=datetime(2026, 11, 29, 7, 30, tzinfo=UTC),
+            dtype="WORKDAY",
+            flags=self.FLAGS,
+            now=datetime(2026, 11, 29, 7, 30, tzinfo=UTC),
+            live_map={},
+            prof_map={},
+            class_map=class_map,
+            ratio_map=ratio_map,
+        )
+
+    def test_ratio_scales_with_free_speed(self):
+        """نفس النسبة تعطي سرعات مختلفة لمقطع سرعته الحرة مختلفة.
+
+        هذا جوهر التحسين: الوسيط المطلق كان يعطي 24 كم/س لكليهما.
+        """
+        slow = self._est(40.0, {"primary": 0.5})
+        fast = self._est(80.0, {"primary": 0.5})
+        assert slow.speed_kmh == pytest.approx(20.0, abs=0.1)
+        assert fast.speed_kmh == pytest.approx(40.0, abs=0.1)
+        assert fast.speed_kmh > slow.speed_kmh
+
+    def test_ratio_takes_precedence_over_absolute(self):
+        """عند وجود الاثنين، النسبة تفوز — لأنها المقاسة الأفضل."""
+        est = self._est(
+            60.0, {"primary": 0.4}, class_map={"primary": 24.0}
+        )
+        # النسبة 0.4 × 60 = 24، والمطلق 24 — يتفقان هنا عمداً،
+        # لكن جرّب سرعة حرة مختلفة لكشف الفرق.
+        assert est.speed_kmh == pytest.approx(24.0, abs=0.1)
+
+        est2 = self._est(
+            90.0, {"primary": 0.4}, class_map={"primary": 24.0}
+        )
+        assert est2.speed_kmh == pytest.approx(36.0, abs=0.1)
+        assert est2.speed_kmh != pytest.approx(24.0, abs=1.0)
+
+    def test_falls_back_to_absolute_when_ratio_missing(self):
+        """غياب النسبة لا يترك المقطع بلا أولوية."""
+        est = self._est(60.0, {}, class_map={"primary": 22.0})
+        assert est.basis == "class"
+        assert est.speed_kmh == pytest.approx(22.0, abs=0.1)
+
+    def test_zero_ratio_ignored(self):
+        """نسبة صفر تعني بيانات معطوبة، لا طريق متوقف — تُتجاهل."""
+        est = self._est(60.0, {"primary": 0.0}, class_map={"primary": 22.0})
+        assert est.speed_kmh == pytest.approx(22.0, abs=0.1)
+
+    def test_freeflow_when_nothing_known(self):
+        est = self._est(60.0, {}, class_map={})
+        assert est.basis == "freeflow"
+        assert est.confidence == pytest.approx(0.3)
+
+    def test_peak_ratio_below_one(self):
+        """الذروة تُنتج سرعة أقل من الحرة — وإلا فالنسبة لا تحمل معلومة."""
+        est = self._est(60.0, {"primary": 0.44})
+        assert est.speed_kmh < 60.0
+        assert est.speed_kmh == pytest.approx(26.4, abs=0.2)
+
+
 class TestInterpolationMonotonic:
     """الاستيفاء بين الشرائح لا يُنتج منحنى متذبذباً.
 

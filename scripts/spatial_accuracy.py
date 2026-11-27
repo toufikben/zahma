@@ -114,8 +114,13 @@ def main() -> int:
 
     # أولوية الصنف من التدريب فقط: وسيط مرجّح بالطول لكل (صنف، شريحة).
     by_key: dict[tuple[str, int], list[tuple[float, float]]] = defaultdict(list)
+    ratio_key: dict[tuple[str, int], list[tuple[float, float]]] = defaultdict(list)
     for d in train:
         by_key[(d["cls"], d["b"])].append((d["speed"], d["len"]))
+        if d["free"] > 5:
+            ratio_key[(d["cls"], d["b"])].append(
+                (d["speed"] / d["free"], d["len"])
+            )
 
     def weighted_median(vals: list[tuple[float, float]]) -> float:
         vals = sorted(vals)
@@ -128,6 +133,7 @@ def main() -> int:
         return vals[-1][0]
 
     class_prior = {k: weighted_median(v) for k, v in by_key.items()}
+    class_ratio = {k: weighted_median(v) for k, v in ratio_key.items()}
 
     # احتياط: وسيط الصنف عبر كل الشرائح إن غابت الشريحة.
     by_cls: dict[str, list[tuple[float, float]]] = defaultdict(list)
@@ -137,6 +143,7 @@ def main() -> int:
 
     errs_free: list[float] = []
     errs_prior: list[float] = []
+    errs_ratio: list[float] = []
     hit = {"exact_bucket": 0, "class_any": 0, "none": 0}
 
     for d in test:
@@ -155,6 +162,11 @@ def main() -> int:
                 prior = d["free"]
         errs_prior.append((prior - actual) / actual * 100)
 
+        # نموذج النسبة: نسبة الأداء × السرعة الحرة لهذا المقطع.
+        r = class_ratio.get((d["cls"], d["b"]))
+        r_pred = r * d["free"] if r is not None else prior
+        errs_ratio.append((r_pred - actual) / actual * 100)
+
     def report(name: str, errs: list[float]) -> dict:
         a = sorted(abs(e) for e in errs)
         n = len(a)
@@ -168,11 +180,12 @@ def main() -> int:
         }
 
     r_free = report("سرعة حرة (OSM)", errs_free)
-    r_prior = report("أولوية الصنف", errs_prior)
+    r_prior = report("أولوية مطلقة", errs_prior)
+    r_ratio = report("نسبة × سرعة حرة", errs_ratio)
 
     print(f"\n{'الأساس':<22} {'وسيط':>7} {'متوسط':>7} {'p75':>7} {'p90':>7} {'تحيز':>7}")
     print("─" * 64)
-    for r in (r_free, r_prior):
+    for r in (r_free, r_prior, r_ratio):
         print(
             f"{r['name']:<22} {r['median']:>6.1f}% {r['mean']:>6.1f}% "
             f"{r['p75']:>6.1f}% {r['p90']:>6.1f}% {r['bias']:>+6.1f}%"
@@ -183,12 +196,13 @@ def main() -> int:
     print(f"   وسيط الصنف كله   {hit['class_any']:>6}")
     print(f"   لا شيء (سرعة حرة) {hit['none']:>6}")
 
-    gain = 1 - r_prior["median"] / r_free["median"]
-    print(f"\n── الحكم: أولوية الصنف تحسّن الخطأ بمقدار {gain * 100:.0f}%")
-    if r_prior["median"] <= 30.0:
-        print(f"   ✓ خطأ {r_prior['median']:.1f}% على مقاطع لم تُقس — مقبول")
+    gain = 1 - r_ratio["median"] / r_free["median"]
+    print(f"\n── الحكم: نسبة الأداء تحسّن الخطأ على السرعة الحرة بمقدار {gain * 100:.0f}%")
+    print(f"   p90: {r_free['p90']:.0f}% → {r_prior['p90']:.0f}% (مطلق) → {r_ratio['p90']:.0f}% (نسبة)")
+    if r_ratio["median"] <= 30.0:
+        print(f"   ✓ خطأ {r_ratio['median']:.1f}% على مقاطع لم تُقس — مقبول")
         return 0
-    print(f"   ! خطأ {r_prior['median']:.1f}% — يحتاج تحسيناً")
+    print(f"   ! خطأ {r_ratio['median']:.1f}% — يحتاج تحسيناً")
     return 1
 
 
