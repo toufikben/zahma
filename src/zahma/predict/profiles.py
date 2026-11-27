@@ -19,6 +19,63 @@ from zahma.db import session_scope
 
 MIN_SAMPLES = 3
 
+# ── إسناد أيام المصدر إلى أيامنا: بالسلوك لا بالتقويم ─────────────────
+#
+# **العيب الذي يصلحه هذا الجدول:** كان البناء يقرأ `calendar_days.day_type`
+# مباشرة، أي يثق أن يوم الأحد في المصدر هو يوم أحد جزائري. القياس يثبت
+# العكس تماماً.
+#
+# مقاس على 20 زوجاً عند 17:00 (متوسط المدة بالدقائق):
+#
+#     المصدر: الاثنين–الخميس 47.4 | الجمعة 47.3 | السبت 44.2 | الأحد 43.8
+#
+# أي أن Mapbox يطبّق **عطلة غربية**: السبت والأحد فارغان، والجمعة ذروة
+# كاملة. والجزائر عكس ذلك: الجمعة أفرغ يوم، والأحد يوم عمل.
+#
+# الأثر المقاس قبل الإصلاح: كنّا نعرض للمستخدم أن الجمعة أسوأ يوم بفارق
+# **3.5 دقيقة**، بينما هي أفرغ يوم في الجزائر. وكنّا نُدخل الأحد (فارغاً)
+# في ملف `WORKDAY` فيخفّف ذروة أيام العمل الحقيقية بـ**3.6 دقيقة**.
+#
+# **الإصلاح:** نُسند يوم المصدر إلى اليوم الجزائري الذي يشبهه سلوكاً:
+#   - أحد المصدر (أفرغ) ⇒ جمعة عندنا (أفرغ)
+#   - سبت المصدر (شبه فارغ) ⇒ سبت عندنا
+#   - اثنين–جمعة المصدر (ذروة) ⇒ يوم عمل عندنا
+#
+# **حدّ صريح:** هذا إسقاط سلوكي لا معرفة. نعرف أن الأحد المصدر يشبه
+# الجمعة عندنا في *الفراغ*، ولا نعرف أن منحنى الجمعة الجزائري يساوي
+# منحنى الأحد الغربي ساعةً بساعة. لذلك يبقى هذا أكبر مصدر خطأ منهجي في
+# المنتج، ويحتاج حقيقة أرضية جزائرية لتصحيحه — وهي غير متاحة من أي مزوّد.
+SOURCE_DAY_TYPE_MAP: dict[int, str] = {
+    1: "WORKDAY",   # الاثنين
+    2: "WORKDAY",   # الثلاثاء
+    3: "WORKDAY",   # الأربعاء
+    4: "WORKDAY",   # الخميس
+    5: "WORKDAY",   # الجمعة (المصدر): ذروة كاملة — نُبقيها يوم عمل
+    6: "SATURDAY",  # السبت (المصدر): شبه فارغ
+    7: "FRIDAY",    # الأحد (المصدر): أفرغ يوم ⇒ جمعة عندنا
+}
+
+
+def _day_type_sql(alias: str = "s") -> str:
+    """تعبير SQL يحوّل تاريخ العينة إلى نوع يوم جزائري بالسلوك.
+
+    يُبنى من `SOURCE_DAY_TYPE_MAP` — مصدر واحد للحقيقة. لو كُتب التعبير
+    يدوياً في كل استعلام لاختلف بين بناء الملفات وبناء ملفات الأصناف.
+
+    **العطلات تبقى عطلات:** إن صنّفها تقويمنا `HOLIDAY` فلا نُعيد إسنادها،
+    لأن يوم عطاء رسمي جزائري ليس له مقابل في أيام الأسبوع الغربية.
+    """
+    whens = "\n                ".join(
+        f"WHEN {dow} THEN '{dtype}'" for dow, dtype in sorted(SOURCE_DAY_TYPE_MAP.items())
+    )
+    return f"""CASE
+                    WHEN c.is_ramadan THEN 'RAMADAN'
+                    WHEN c.day_type = 'HOLIDAY' THEN 'HOLIDAY'
+                    ELSE CASE EXTRACT(ISODOW FROM ({alias}.ts_utc AT TIME ZONE 'Africa/Algiers'))::int
+                {whens}
+                    END
+                END"""
+
 
 def rebuild(
     verbose: bool = True,
@@ -70,10 +127,7 @@ def rebuild(
             SELECT
                 s.segment_id,
                 s.speed_kmh,
-                CASE
-                    WHEN c.is_ramadan THEN 'RAMADAN'
-                    ELSE c.day_type
-                END AS d_type,
+                {_day_type_sql("s")} AS d_type,
                 c.is_ramadan,
                 c.is_school,
                 ((EXTRACT(HOUR FROM (s.ts_utc AT TIME ZONE 'Africa/Algiers')) * 4)
@@ -135,7 +189,7 @@ def rebuild(
                     SELECT
                         s.segment_id,
                         s.speed_kmh,
-                        CASE WHEN c.is_ramadan THEN 'RAMADAN' ELSE c.day_type END AS d_type,
+                        {_day_type_sql("s")} AS d_type,
                         c.is_ramadan,
                         c.is_school,
                         ((EXTRACT(HOUR FROM (s.ts_utc AT TIME ZONE 'Africa/Algiers')) * 4)
@@ -230,7 +284,7 @@ def rebuild_class_profiles(
                 s.speed_kmh,
                 sg.length_m,
                 sg.speed_free_kmh,
-                CASE WHEN c.is_ramadan THEN 'RAMADAN' ELSE c.day_type END AS d_type,
+                {_day_type_sql("s")} AS d_type,
                 c.is_ramadan,
                 ((EXTRACT(HOUR FROM (s.ts_utc AT TIME ZONE 'Africa/Algiers')) * 4)
                  + FLOOR(EXTRACT(MINUTE FROM (s.ts_utc AT TIME ZONE 'Africa/Algiers')) / 15))::smallint
