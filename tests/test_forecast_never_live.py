@@ -6,6 +6,10 @@
 مستقبلياً وسمّاها «قياساً حياً» بثقة 0.9. المنتج كان يعلن أنه يعرف
 «الآن» بينما يقرأ جدولاً نموذجياً.
 
+> الاختبارات التي تثبت هذا العيب تحتاج قاعدة بيانات فعلية (تقرأ
+> `samples`)، فهي في `test_forecast_live_window.py` وتُشغَّل في وظيفة
+> `integration`. هنا حرّاس العيب الثاني، وهم بلا قاعدة بيانات.
+
 **العيب الثاني: يوم كامل يُحذف بصمت.**
 `MIN_SAMPLES = 3` يمرّ دون أن يقول شيئاً. الجمعة لها يوم واحد من
 البيانات (77,332 تركيبة بمتوسط 1.00 عينة) فحُذفت **كلها**، والأحد
@@ -18,47 +22,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-
 import pytest
 
-from zahma.predict.engine import fetch_live_speeds_bulk
 from zahma.predict.profiles import MIN_SAMPLES
-
-
-class TestForecastIsNeverLive:
-    """التنبؤ لا يُقرأ أبداً كقياس آني."""
-
-    def test_future_rows_are_not_returned_as_live(self):
-        """العيب الأصلي: 674,137 صفاً مستقبلياً عادت كأنها «الآن».
-
-        نمرّر `now` مبكراً (قبل كل صفوفنا) ونتوقع صفراً — لا بيانات
-        حيّة أصلاً، وهذا هو الصدق.
-        """
-        early = datetime(2026, 11, 1, 0, 0, tzinfo=UTC)
-        live = fetch_live_speeds_bulk(early, max_age_min=10.0)
-        assert live == {}, "التنبؤ المستقبلي تسرّب كقياس حي"
-
-    def test_live_window_is_bounded_on_both_sides(self):
-        """`now` في وسط البيانات المستقبلية: يجب ألا تتجاوز النافذة.
-
-        نضع `now` عند 2 ديسمبر 10:00 مع نافذة 10 دقائق. أي صف بعد
-        10:10 يجب ألا يظهر. قبل الإصلاح كان كل صف مستقبلي يظهر.
-        """
-        mid = datetime(2026, 12, 2, 9, 0, tzinfo=UTC)
-        live = fetch_live_speeds_bulk(mid, max_age_min=10.0)
-        # لا نتحقق من العدد بل من أن النتيجة لا تتضمن ما هو بعد النافذة.
-        # كل صفوف mapbox موسومة forecast فتُستبعد صراحةً.
-        assert all(isinstance(k, int) for k in live)
-
-    def test_forecast_marker_is_excluded(self):
-        """الوسم `forecast` مستبعد صريحاً، لا بالمصادفة الزمنية."""
-        now = datetime(2026, 12, 2, 9, 0, tzinfo=UTC)
-        live = fetch_live_speeds_bulk(now, max_age_min=10.0)
-        # لا يوجد في القاعدة صف واحد غير forecast ضمن هذه النافذة.
-        assert len(live) == 0, (
-            "صفوف forecast ظهرت كقياس حي — الوسم لم يُطبَّق"
-        )
 
 
 class TestSilentDeletionIsVisible:

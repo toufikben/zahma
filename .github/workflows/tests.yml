@@ -42,7 +42,24 @@ jobs:
 
       - name: Run unit tests
         run: |
-          python -m pytest tests/test_predict.py tests/test_time_and_prior.py \
+          # كل ملفات الاختبار التي لا تحتاج قاعدة بيانات. كانت هذه
+          # الخطوة تُشغّل ملفين فقط (90 اختباراً)، فكانت 134 اختباراً
+          # تُشغَّل محلياً ولا تُشغَّل في CI إطلاقاً — أي أن الحماية
+          # موجودة على الورق فقط.
+          #
+          # المستبعد عمداً (يحتاج PostGIS + شبكة مبنية):
+          #   test_topology.py, test_resilience.py, test_forecast_live_window.py
+          python -m pytest \
+            tests/test_predict.py \
+            tests/test_time_and_prior.py \
+            tests/test_router.py \
+            tests/test_match.py \
+            tests/test_data_honesty.py \
+            tests/test_week_structure.py \
+            tests/test_provider_coverage.py \
+            tests/test_night_coverage.py \
+            tests/test_network_resilience.py \
+            tests/test_forecast_never_live.py \
             -v --tb=short
 
   # ---------------------------------------------------------------
@@ -124,8 +141,12 @@ jobs:
 
       - name: Topology + router guards
         run: |
+          # `test_forecast_never_live` يحتاج قاعدة بيانات (يقرأ `samples`
+          # فعلياً ليثبت أن الصفوف المستقبلية لا تُقرأ كقياس حي). لم يكن
+          # يُشغَّل في أي مكان داخل CI — لا في unit ولا هنا.
           python -m pytest tests/test_topology.py tests/test_router.py \
-            tests/test_resilience.py -v --tb=short
+            tests/test_resilience.py tests/test_forecast_live_window.py \
+            -v --tb=short
 
       - name: End-to-end prediction
         run: |

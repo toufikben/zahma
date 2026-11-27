@@ -60,10 +60,15 @@ def profile_report() -> dict:
 
 
 def curve_report() -> list[tuple[str, float, float]]:
-    """منحنى الانطلاق من 06:00 إلى 20:00 محلياً."""
-    base = datetime(2026, 11, 30, 5, 0, tzinfo=UTC)  # 06:00 محلي
+    """منحنى الانطلاق على 24 ساعة محلياً.
+
+    كان 06:00–20:00 فقط، فكان يخفي كل ما جمعناه ليلاً. المنحنى الكامل
+    ضروري: الليل أسرع بـ60% من الذروة المسائية (مقاس مباشرة من API)،
+    وهذا فرق يجب أن يراه المستخدم في «متى أخرج».
+    """
+    base = datetime(2026, 11, 30, 0, 0, tzinfo=UTC)  # 01:00 محلي (UTC+1)
     out: list[tuple[str, float, float]] = []
-    for i in range(15):
+    for i in range(0, 24, 1):
         t = base.replace(hour=base.hour + i)
         est = estimate_route(FROM[0], FROM[1], TO[0], TO[1], when=t, now=t)
         out.append(
