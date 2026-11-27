@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from zahma.config import get_settings
+from zahma.collect.http import RetryingClient
 from zahma.sources.base import Incident, SourceError, SourceResult, TrafficSource
 
 BASE = "https://api.tomtom.com/traffic/services/5/incidentDetails"
@@ -70,7 +71,8 @@ class TomTomIncidentsSource(TrafficSource):
             params["categoryFilter"] = category_filter
 
         try:
-            r = httpx.get(BASE, params=params, timeout=self.timeout)
+            with RetryingClient(timeout=self.timeout) as client:
+                r = client.get(BASE, params=params)
         except Exception as e:  # noqa: BLE001
             return SourceResult(source=self.name, ok=False, fetched_at=now, error=str(e))
 

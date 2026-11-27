@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from zahma.config import get_settings
+from zahma.collect.http import RetryingClient
 from zahma.sources.base import (
     SegmentSample,
     SourceError,
@@ -62,7 +63,8 @@ class TomTomFlowSource(TrafficSource):
                 source=self.name, ok=False, fetched_at=now, error="TOMTOM_KEY missing"
             )
 
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(timeout=self.timeout) as _raw:
+            client = RetryingClient(timeout=self.timeout, client=_raw, retry_on_429=False)
             for pt in points:
                 url = f"{BASE}/{style}/{zoom}/json"
                 params = {
@@ -125,11 +127,11 @@ class TomTomFlowSource(TrafficSource):
         if not self.available():
             return {"ok": False, "error": "TOMTOM_KEY missing"}
         try:
-            r = httpx.get(
-                f"{BASE}/absolute/{zoom}/json",
-                params={"key": self.settings.tomtom_key, "point": f"{lat},{lon}"},
-                timeout=self.timeout,
-            )
+            with RetryingClient(timeout=self.timeout) as client:
+                r = client.get(
+                    f"{BASE}/absolute/{zoom}/json",
+                    params={"key": self.settings.tomtom_key, "point": f"{lat},{lon}"},
+                )
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e)}
         if r.status_code >= 400:

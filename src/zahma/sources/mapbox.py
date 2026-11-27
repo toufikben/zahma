@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from zahma.config import get_settings
+from zahma.collect.http import RetryingClient
 from zahma.sources.base import (
     RouteSample,
     SegmentSample,
@@ -69,7 +70,11 @@ class MapboxSource(TrafficSource):
                 error="MAPBOX_TOKEN missing",
             )
 
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(timeout=self.timeout) as _raw:
+            # 429 عند Mapbox = نهاية الحصة الشهرية، لا مجرد تأخير. إعادتها
+            # تُهدر ما تبقّى منها بلا فائدة. لذلك retry_on_429=False هنا
+            # وحده، خلافاً للافتراضي.
+            client = RetryingClient(timeout=self.timeout, client=_raw, retry_on_429=False)
             for p in pairs:
                 coords = (
                     f"{p['from'][1]},{p['from'][0]};{p['to'][1]},{p['to'][0]}"
@@ -84,7 +89,9 @@ class MapboxSource(TrafficSource):
                 }
                 try:
                     r = client.get(url, params=params)
-                    used += 1
+                    # كل محاولة تستهلك حصة، لا كل زوج. إخفاء ذلك يجعل
+                    # تقرير الاستهلاك كاذباً.
+                    used += client.last_attempts
                     if r.status_code == 429:
                         raise SourceError("rate limited", quota_exhausted=True)
                     if r.status_code >= 400:

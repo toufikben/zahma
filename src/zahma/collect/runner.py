@@ -154,6 +154,19 @@ class Collector:
         peak = is_peak(now)
         self.stats = {}
 
+        # --- 0. استنزاف الطابور أولاً ---
+        # إن كانت الدورة السابقة فشلت (شبكة أو قاعدة بيانات)، فالبيانات
+        # محفوظة في SQLite. نحاول كتابتها قبل جمع جديد، وإلا تراكمت
+        # للأبد. `drain` موجود منذ الآن؛ قبله كان الطابور يُكتب ولا يُقرأ.
+        try:
+            from zahma.collect.drain import drain
+
+            d = drain(limit=500)
+            if d["claimed"]:
+                self.stats["drain"] = {"ok": True, **d}
+        except Exception as e:  # noqa: BLE001
+            self.stats["drain"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
         # --- 1. الطقس (مجاني، بلا حصة) ---
         if self.settings.weather_enabled:
             self._run_source(WeatherSource(), lambda: WeatherSource().fetch())
@@ -227,10 +240,54 @@ class Collector:
 
                     write_weather(result.raw_meta, result.fetched_at)
             except Exception as e:  # noqa: BLE001
-                # فشل الكتابة ⇒ نضعه في الطابور حتى لا يُفقد
+                # فشل الكتابة ⇒ نحفظ **البيانات نفسها** لا وصف الخطأ.
+                #
+                # العيب الذي أُصلح: كان يُحفظ {"error", "meta"} فقط. لا
+                # عينات فيه. فالطابور كان يحتفظ بإشعار فشل لا يمكن
+                # استعادته إلى صفوف — أي أن «الحماية من انقطاع الشبكة»
+                # لم تكن تحمي شيئاً. البيانات كانت تُفقد فعلياً بينما
+                # يبدو أنها محفوظة.
                 error = f"{type(e).__name__}: {e}"
-                queue.push(name, "result", {"error": error, "meta": result.raw_meta})
-                self.stats[name] = {"ok": False, "error": error, "queued": True}
+                try:
+                    queue.push(
+                        name,
+                        "result",
+                        {
+                            "segment_samples": [
+                                {
+                                    "segment_id": x.segment_id,
+                                    "source": x.source,
+                                    "ts_utc": x.ts_utc.isoformat(),
+                                    "speed_kmh": x.speed_kmh,
+                                    "freeflow_kmh": x.freeflow_kmh,
+                                    "travel_time_s": x.travel_time_s,
+                                    "confidence": x.confidence,
+                                    "raw_ref": x.raw_ref,
+                                }
+                                for x in result.segment_samples
+                            ],
+                            "route_samples": [
+                                {
+                                    "pair_id": x.pair_id,
+                                    "source": x.source,
+                                    "ts_utc": x.ts_utc.isoformat(),
+                                    "duration_s": x.duration_s,
+                                    "distance_m": x.distance_m,
+                                    "confidence": x.confidence,
+                                }
+                                for x in result.route_samples
+                            ],
+                            "error": error,
+                        },
+                    )
+                    self.stats[name] = {"ok": False, "error": error, "queued": True}
+                except Exception as qe:  # noqa: BLE001
+                    # الطابور نفسه فشل ⇒ هنا فقط تُفقد البيانات. نُعلنها.
+                    self.stats[name] = {
+                        "ok": False,
+                        "error": f"{error}; queue failed: {qe}",
+                        "lost": True,
+                    }
                 touch_health(name, ok=False, error=error)
                 return
 

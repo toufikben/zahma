@@ -12,9 +12,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
-
 from zahma.config import ALGIERS_CENTER
+from zahma.collect.http import RetryingClient
 from zahma.sources.base import SourceResult, TrafficSource
 
 BASE = "https://api.open-meteo.com/v1/forecast"
@@ -47,7 +46,8 @@ class WeatherSource(TrafficSource):
             "timezone": "Africa/Algiers",
         }
         try:
-            r = httpx.get(BASE, params=params, timeout=self.timeout)
+            with RetryingClient(timeout=self.timeout) as client:
+                r = client.get(BASE, params=params)
             r.raise_for_status()
             data = r.json()
         except Exception as e:  # noqa: BLE001
@@ -97,7 +97,8 @@ class WeatherSource(TrafficSource):
             "timezone": "Africa/Algiers",
         }
         try:
-            r = httpx.get(BASE, params=params, timeout=self.timeout)
+            with RetryingClient(timeout=self.timeout) as client:
+                r = client.get(BASE, params=params)
             r.raise_for_status()
             data = r.json()
         except Exception:  # noqa: BLE001
