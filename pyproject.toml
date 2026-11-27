@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "Traffic prediction and departure advisor for Algiers"
 requires-python = ">=3.11"
 dependencies = [
-    "osmnx>=2.0",
+    # OSM reading — pyrosm is the only one we actually import.
+    # osmnx was listed but never imported; it pulls a heavy geo stack
+    # (matplotlib, rasterio, folium) that CI does not need.
+    "pyrosm>=0.6.2",
     "networkx>=3.2",
     "geopandas>=1.0",
     "shapely>=2.0",

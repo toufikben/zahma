@@ -18,11 +18,16 @@ def get_engine():
     global _engine
     if _engine is None:
         s = get_settings()
+        # connect_timeout: بلا هذا، أي اتصال بقاعدة متوقفة ينتظر مهلة TCP
+        # (~21 ثانية على ويندوز، ~2 ثانية على لينكس). في اختبارات بلا
+        # قاعدة، يتكرر ذلك عشرات المرات فتصل الحزمة إلى 4 دقائق.
+        # وفي الإنتاج: خدمة لا تستجيب يجب أن تفشل في ثانيتين لا في 21.
         _engine = create_engine(
             s.database_url,
             pool_pre_ping=True,
             pool_size=5,
             max_overflow=10,
+            connect_args={"connect_timeout": 3},
             future=True,
         )
     return _engine
