@@ -1,14 +1,25 @@
-"""المرحلة 0 — تجربة الحسم.
+"""المرحلة 0 — تقرير الحقيقة.
 
-السؤال الوحيد: هل لدى Mapbox/TomTom بيانات حركة حقيقية للجزائر؟
+السؤال الوحيد: هل لدينا إشارة حركة حقيقية قابلة للبيع في الجزائر؟
 
-لماذا هذه الخطوة أولاً:
-إن أظهر profile `driving-traffic` نفس مدة `driving`، فلا توجد بيانات
-حركة — والمنتج كله مبني على رمل. نعرف ذلك في دقائق، لا في أسابيع.
+**الخطأ الذي كانت ترتكبه النسخة السابقة** (ومُصلَح هنا): كانت تقارن
+`driving` بـ`driving-traffic` **في اللحظة الحالية**. شغّلناها الساعة
+04:41 محلياً — الشوارع فارغة — فكان الفرق 1% وحكمت «لا بيانات حركة،
+المشروع يحتاج إعادة تصميم». كان ذلك حكماً كاذباً: المقارنة كانت تقيس
+الساعة لا تغطية المزوّد.
 
-المعيار:
-- Mapbox: فرق ≥ 5% بين driving و driving-traffic ⇒ بيانات حقيقية.
-- TomTom: ratio = current/freeflow ≤ 0.85 ⇒ زحمة مرصودة فعلاً.
+**القياس الصحيح** هو أن نسأل المزوّد عن مدة الرحلة في ساعات مختلفة من
+**نفس اليوم** عبر `depart_at`. إن تغيّرت المدة مع الساعة فالمزوّد يعرف
+نمط الازدحام — وهذا كل ما يحتاجه منتج التنبؤ. ولا حاجة لأن تكون
+الشوارع مزدحمة في لحظة تشغيل الفحص.
+
+قياس فعلي على باب الزوار ← وسط العاصمة (الاثنين 2026-11-30):
+
+    05:30  18.6 د      12:00  26.0 د
+    07:00  24.4 د      17:30  28.6 د
+    08:00  26.2 د      19:00  24.8 د
+
+مدى 10 دقائق — إشارة حقيقية.
 """
 
 from __future__ import annotations
@@ -26,7 +37,7 @@ from zahma.sources.tomtom_incidents import TomTomIncidentsSource
 
 console = Console()
 
-# ثلاثة محاور مزدحمة معروفة في العاصمة — نقاط على الطرق الفعلية
+# محاور الاختبار: موزّعة جغرافياً — شرق، غرب، جنوب.
 PROBES = [
     {
         "name": "الحراش ← وسط العاصمة",
@@ -49,10 +60,11 @@ PROBES = [
 ]
 
 
-def run_probe() -> dict:
+def run_probe(probe_day: str = "2026-11-30") -> dict:
     s = get_settings()
     out: dict = {
         "timestamp": datetime.now(UTC).isoformat(),
+        "probe_day": probe_day,
         "has_mapbox": s.has_mapbox,
         "has_tomtom": s.has_tomtom,
         "results": [],
@@ -60,7 +72,7 @@ def run_probe() -> dict:
     }
 
     if not s.has_mapbox and not s.has_tomtom:
-        console.print("[red]✗ لا توجد مفاتيح. ضع MAPBOX_TOKEN و TOMTOM_KEY في .env[/red]")
+        console.print("[red]✗ لا يوجد مفتاح. ضع MAPBOX_TOKEN أو TOMTOM_KEY في .env[/red]")
         out["verdict"] = "no_keys"
         return out
 
@@ -71,8 +83,7 @@ def run_probe() -> dict:
         row = {"probe": p["name"]}
 
         if s.has_mapbox:
-            r = mb.probe(p["origin"], p["dest"])
-            row["mapbox"] = r
+            row["mapbox"] = mb.probe(p["origin"], p["dest"], probe_day=probe_day)
         if s.has_tomtom:
             lat, lon = p["flow_point"]
             row["tomtom"] = tt.probe(lat, lon)
@@ -87,12 +98,15 @@ def run_probe() -> dict:
             out["incidents"] = {"ok": False, "error": str(e)}
 
     # ---------- الحكم ----------
+    # المعيار: محور واحد على الأقل تُظهر مدته تغيّراً ≥ 8% بين الساعات.
     mb_hits = sum(
-        1 for r in out["results"]
-        if r.get("mapbox", {}).get("has_live_traffic") is True
+        1
+        for r in out["results"]
+        if r.get("mapbox", {}).get("has_time_varying_traffic") is True
     )
     tt_hits = sum(
-        1 for r in out["results"]
+        1
+        for r in out["results"]
         if r.get("tomtom", {}).get("has_congestion_data") is True
     )
 
@@ -107,29 +121,47 @@ def run_probe() -> dict:
         out["verdict"] = "WEAK"
 
     # ---------- العرض ----------
-    t = Table(title=f"المرحلة 0 — فحص بيانات الحركة ({out['timestamp'][:19]} UTC)")
+    t = Table(title=f"المرحلة 0 — إشارة الحركة ({out['timestamp'][:19]} UTC)")
     t.add_column("المحور", style="cyan")
-    t.add_column("Mapbox driving", justify="right")
-    t.add_column("Mapbox traffic", justify="right")
-    t.add_column("الفرق %", justify="right")
-    t.add_column("TomTom cur/free", justify="right")
-    t.add_column("نسبة", justify="right")
+    t.add_column("07:30", justify="right")
+    t.add_column("12:00", justify="right")
+    t.add_column("17:30", justify="right")
+    t.add_column("المدى %", justify="right")
+    t.add_column("تغطية الأصناف", justify="right")
 
     for r in out["results"]:
         m = r.get("mapbox", {})
-        tt_r = r.get("tomtom", {})
-        a = m.get("driving", {}).get("duration_s")
-        b = m.get("driving-traffic", {}).get("duration_s")
-        diff = m.get("diff_pct")
+        by = m.get("by_hour", {})
+
+        def fmt(hh: str) -> str:
+            v = by.get(hh, {})
+            d = v.get("duration_s")
+            return f"{d / 60:.1f}d" if d else "—"
+
+        spread = m.get("spread_pct")
+        cong = m.get("congestion", {})
+        cov = cong.get("coverage_pct")
+        cov_s = f"{cov}%" if cov is not None else "—"
+
         t.add_row(
             r["probe"],
-            f"{a:.0f}s" if a else "—",
-            f"{b:.0f}s" if b else "—",
-            f"{diff:+.1f}%" if diff is not None else "—",
-            f"{tt_r.get('current')}/{tt_r.get('freeflow')}" if tt_r.get("ok") else "—",
-            f"{tt_r.get('ratio')}" if tt_r.get("ratio") is not None else "—",
+            fmt("07:30"),
+            fmt("12:00"),
+            fmt("17:30"),
+            f"{spread:.1f}%" if spread is not None else "—",
+            cov_s,
         )
     console.print(t)
+
+    # تفصيل حاسم: هل التغطية على مستوى المقطع موجودة أم لا؟
+    for r in out["results"]:
+        cong = r.get("mapbox", {}).get("congestion", {})
+        if cong.get("segments"):
+            console.print(
+                f"  [dim]{r['probe']}: {cong['segments']} مقطع، "
+                f"أصناف معروفة {cong['known']}، مجهولة {cong['unknown']} "
+                f"({cong.get('classes')})[/dim]"
+            )
 
     if out.get("incidents", {}).get("ok"):
         inc = out["incidents"]
@@ -143,11 +175,15 @@ def run_probe() -> dict:
 
     verdict = out["verdict"]
     if verdict == "GOOD":
-        console.print(f"\n[green]✓ بيانات حركة حقيقية مؤكدة ({mb_hits} Mapbox + {tt_hits} TomTom)[/green]")
+        console.print(
+            f"\n[green]✓ إشارة حركة حقيقية مؤكدة ({mb_hits} Mapbox + {tt_hits} TomTom)[/green]"
+        )
     elif verdict == "WEAK":
-        console.print(f"\n[yellow]! بيانات ضعيفة ({mb_hits} Mapbox + {tt_hits} TomTom) — نكمل بمصدر واحد[/yellow]")
+        console.print(
+            f"\n[yellow]! إشارة ضعيفة ({mb_hits} Mapbox + {tt_hits} TomTom) — نكمل بمصدر واحد[/yellow]"
+        )
     elif verdict == "NO_TRAFFIC_DATA":
-        console.print("\n[red]✗ لا بيانات حركة. المشروع يحتاج إعادة تصميم.[/red]")
+        console.print("\n[red]✗ لا إشارة حركة. المشروع يحتاج إعادة تصميم.[/red]")
 
     return out
 

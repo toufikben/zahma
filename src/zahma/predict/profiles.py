@@ -20,13 +20,28 @@ from zahma.db import session_scope
 MIN_SAMPLES = 3
 
 
-def rebuild(verbose: bool = True) -> dict:
+def rebuild(verbose: bool = True, sources: tuple[str, ...] | None = None) -> dict:
     """يعيد بناء speed_profiles من samples.
 
     يتم كل شيء في Postgres — أسرع بكثير من المعالجة في Python،
     ويستفيد من الفهارس الموجودة.
+
+    `sources`: أي مصادر تُدخل في الحساب. الافتراضي كل شيء. تمرير
+    `("mapbox",)` يبني الملفات من بيانات حقيقية فقط — وهذا مهم قبل
+    الإطلاق: خلط بيانات `mock` (منحنى رياضي مصطنع) مع قياسات حقيقية
+    يجعل الملفات تبدو أفضل مما هي، ويُخفي فجوات التغطية الحقيقية.
     """
     t0 = datetime.now(UTC)
+
+    src_clause = ""
+    params: dict = {}
+    if sources:
+        # المقارنة عبر ::text لا عبر نوع enum مباشرة: psycopg يرسل
+        # قائمة Python كـtext[]، وPostgres لا يحوّلها إلى source_kind[]
+        # تلقائياً في هذا السياق — فتعود النتيجة صفراً بلا أي خطأ.
+        # عيب صامت: الملفات تُبنى فارغة ويبدو أن لا بيانات.
+        src_clause = "AND s.source::text = ANY(CAST(:sources AS text[]))"
+        params["sources"] = list(sources)
 
     sql = text(
         f"""
@@ -49,6 +64,7 @@ def rebuild(verbose: bool = True) -> dict:
             WHERE s.speed_kmh IS NOT NULL
               AND s.speed_kmh > 0
               AND s.speed_kmh <= 200
+              {src_clause}
         ),
         profiled AS (
             SELECT
@@ -83,7 +99,7 @@ def rebuild(verbose: bool = True) -> dict:
 
     with session_scope() as s:
         s.execute(text("TRUNCATE speed_profiles"))
-        s.execute(sql)
+        s.execute(sql, params)
         n = s.execute(text("SELECT COUNT(*) FROM speed_profiles")).scalar()
         n_seg = s.execute(text("SELECT COUNT(DISTINCT segment_id) FROM speed_profiles")).scalar()
 

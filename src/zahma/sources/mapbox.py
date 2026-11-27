@@ -155,40 +155,157 @@ class MapboxSource(TrafficSource):
             raw_meta={"bucket": bucket.isoformat(), "pairs": len(pairs)},
         )
 
-    def probe(self, origin: tuple[float, float], dest: tuple[float, float]) -> dict[str, Any]:
-        """استدعاء واحد للتحقق: هل توجد بيانات حركة حقيقية؟
+    def probe(
+        self,
+        origin: tuple[float, float],
+        dest: tuple[float, float],
+        probe_day: str = "2026-11-30",
+    ) -> dict[str, Any]:
+        """هل يملك Mapbox إشارة حركة حقيقية للجزائر؟ — الاختبار الحقيقي.
 
-        يقارن driving (بلا زحمة) مع driving-traffic (بالزحمة).
-        إن تساوت المدد ⇒ لا بيانات حركة لهذا البلد.
+        **لماذا لا يكفي مقارنة `driving` بـ`driving-traffic` الآن:**
+
+        جرّبنا ذلك فعلياً الساعة 04:00 محلياً فكان الفرق 1% فقط. السبب أن
+        الشوارع فارغة في ذلك الوقت، فلا حركة ليقيسها المزوّد. المقارنة
+        «الآن» تقيس الساعة لا جودة التغطية — وقد تعطي حكماً كاذباً بأن
+        المشروع بلا بيانات.
+
+        **ما نقيسه بدلاً من ذلك:**
+
+        1. `duration` مقابل `duration_typical` عبر `depart_at` في ساعات
+           مختلفة. إن كانت النسبة تتغيّر مع الساعة ⇒ المزوّد يعرف نمط
+           الازدحام الزمني، وهذا كل ما نحتاجه للتنبؤ.
+        2. `driving` (بلا حركة) مقابل `driving-traffic` عند **نفس** ساعة
+           الذروة. الفرق هنا يعزل أثر الحركة عن أثر الطريق.
+        3. تغطية `congestion` لكل مقطع. مقيس فعلياً: في الجزائر العاصمة
+           كل المقاطع تُرجع `"unknown"` — لا أصناف ازدحام على مستوى
+           المقطع. هذه حقيقة يجب أن تُسجَّل لا أن تُخفى.
+
+        الحكم النهائي مبني على **مدى تغيّر المدة مع الساعة**، لأنه هو
+        ما يحدد إن كان المنتج ممكناً أم لا.
         """
         if not self.available():
             return {"ok": False, "error": "MAPBOX_TOKEN missing"}
 
         coords = f"{origin[1]},{origin[0]};{dest[1]},{dest[0]}"
-        out: dict[str, Any] = {}
+        out: dict[str, Any] = {"ok": True}
+
+        # ساعات الاختبار: ذروة صباحية، منتصف النهار، ذروة مسائية.
+        hours = ("07:30", "12:00", "17:30")
+
         with httpx.Client(timeout=self.timeout) as client:
-            for prof in ("driving", "driving-traffic"):
+            token = self.settings.mapbox_token
+
+            # ── 1) المدة عبر ساعات اليوم (driving-traffic + depart_at)
+            by_hour: dict[str, Any] = {}
+            for hh in hours:
                 r = client.get(
-                    f"{BASE}/{prof}/{coords}",
+                    f"{BASE}/driving-traffic/{coords}",
                     params={
-                        "access_token": self.settings.mapbox_token,
+                        "access_token": token,
                         "overview": "false",
-                        "annotations": "duration,congestion",
+                        "depart_at": f"{probe_day}T{hh}",
                     },
                 )
                 if r.status_code >= 400:
-                    out[prof] = {"error": f"HTTP {r.status_code}", "body": r.text[:200]}
+                    by_hour[hh] = {
+                        "error": f"HTTP {r.status_code}",
+                        "body": r.text[:200],
+                    }
                     continue
-                d = r.json()
-                rt = (d.get("routes") or [{}])[0]
-                out[prof] = {
+                rt = (r.json().get("routes") or [{}])[0]
+                dur = rt.get("duration")
+                typ = rt.get("duration_typical")
+                by_hour[hh] = {
+                    "duration_s": dur,
+                    "duration_typical_s": typ,
+                    # النسبة > 1 تعني أبطأ من المعتاد = ازدحام مقيس.
+                    "ratio": (round(dur / typ, 3) if dur and typ else None),
+                }
+            out["by_hour"] = by_hour
+
+            # ── 2) بلا حركة مقابل بالحركة عند ذروة صباحية
+            peak = hours[0]
+            r = client.get(
+                f"{BASE}/driving/{coords}",
+                params={
+                    "access_token": token,
+                    "overview": "false",
+                    "depart_at": f"{probe_day}T{peak}",
+                },
+            )
+            if r.status_code < 400:
+                rt = (r.json().get("routes") or [{}])[0]
+                freeflow: dict[str, Any] = {
                     "duration_s": rt.get("duration"),
                     "distance_m": rt.get("distance"),
                 }
+            else:
+                freeflow = {
+                    "error": f"HTTP {r.status_code}",
+                    "body": r.text[:200],
+                }
+            out["freeflow_at_peak"] = freeflow
 
-        a = out.get("driving", {}).get("duration_s")
-        b = out.get("driving-traffic", {}).get("duration_s")
-        if a and b:
-            out["diff_pct"] = round((b - a) / a * 100, 2)
-            out["has_live_traffic"] = abs(out["diff_pct"]) >= 5.0
+            traffic_dur = by_hour.get(peak, {}).get("duration_s")
+            ff_dur = freeflow.get("duration_s")
+            if traffic_dur and ff_dur:
+                # كم تبطئ الحركة الطريق مقارنة بالسرعة الحرة؟
+                out["traffic_penalty_pct"] = round(
+                    (traffic_dur - ff_dur) / ff_dur * 100, 2
+                )
+
+            # ── 3) تغطية congestion على مستوى المقطع
+            # ملاحظة مقاسة: congestion يتطلب overview=full، وإلا 422.
+            r = client.get(
+                f"{BASE}/driving-traffic/{coords}",
+                params={
+                    "access_token": token,
+                    "overview": "full",
+                    "annotations": "congestion,speed,duration",
+                },
+            )
+            if r.status_code < 400:
+                rt = (r.json().get("routes") or [{}])[0]
+                legs = rt.get("legs") or [{}]
+                ann = legs[0].get("annotation") or {}
+                cong = ann.get("congestion") or []
+                speeds = ann.get("speed") or []
+                if cong:
+                    known = [c for c in cong if c and c != "unknown"]
+                    out["congestion"] = {
+                        "segments": len(cong),
+                        "known": len(known),
+                        "unknown": len(cong) - len(known),
+                        "coverage_pct": round(len(known) / len(cong) * 100, 1),
+                        "classes": sorted({c for c in cong if c}),
+                    }
+                else:
+                    out["congestion"] = {"segments": 0, "error": "no annotation"}
+                if speeds:
+                    out["speed_mps_range"] = [
+                        round(min(speeds), 2),
+                        round(max(speeds), 2),
+                    ]
+            else:
+                out["congestion"] = {
+                    "error": f"HTTP {r.status_code}",
+                    "body": r.text[:200],
+                }
+
+        # ── الحكم: هل تتغيّر المدة مع الساعة؟
+        durs = [
+            v["duration_s"]
+            for v in out["by_hour"].values()
+            if isinstance(v, dict) and v.get("duration_s")
+        ]
+        if len(durs) >= 2:
+            lo, hi = min(durs), max(durs)
+            spread_pct = (hi - lo) / lo * 100
+            out["spread_pct"] = round(spread_pct, 2)
+            # 8% فرق بين الذروة والهادئ = إشارة حقيقية قابلة للبيع.
+            out["has_time_varying_traffic"] = spread_pct >= 8.0
+        else:
+            out["has_time_varying_traffic"] = False
+
         return out

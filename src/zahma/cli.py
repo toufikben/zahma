@@ -117,6 +117,56 @@ def mock_fill(
     console.print_json(json.dumps(r, ensure_ascii=False))
 
 
+@app.command("collect-real")
+def collect_real(
+    pairs: int = typer.Option(20, help="عدد أزواج O-D لكل ساعة"),
+    day: str = typer.Option("", help="اليوم YYYY-MM-DD (فارغ = التالي)"),
+    hours: str = typer.Option(
+        "", help="ساعات مفصولة بفاصلة، مثل 07:30,17:30 (فارغ = الافتراضية)"
+    ),
+    days: int = typer.Option(1, help="عدد الأيام ابتداءً من --day"),
+    dry_run: bool = typer.Option(False, help="لا تكتب في القاعدة"),
+) -> None:
+    """جمع قياسات حقيقية من Mapbox وإسقاطها على شبكتنا.
+
+    كل ساعة = طلب لكل زوج. الحصة 100,000 شهرياً.
+    """
+    from datetime import date, timedelta
+
+    from zahma.collect.match import collect
+
+    from datetime import date as _date
+
+    start = date.fromisoformat(day) if day else _date.today()
+    hour_list = hours.split(",") if hours else [
+        "05:30", "06:30", "07:00", "07:30", "08:00", "08:30",
+        "09:00", "10:00", "12:00", "14:00", "16:30", "17:00",
+        "17:30", "18:00", "18:30", "19:00", "21:00",
+    ]
+
+    total_segs = 0
+    total_routes = 0
+    for d in range(days):
+        cur = start + timedelta(days=d)
+        for hh in hour_list:
+            r = collect(
+                limit_pairs=pairs,
+                depart_at=f"{cur}T{hh}",
+                dry_run=dry_run,
+            )
+            total_segs += r.get("segments", 0)
+            total_routes += r.get("routes", 0)
+            console.print(
+                f"{cur} {hh}  segs={r.get('segments', 0):>6}  "
+                f"match={r.get('match_rate_pct', 0):>5.1f}%"
+            )
+
+    console.print(
+        f"\n[bold]الإجمالي:[/bold] {total_segs:,} قياس مقطع، "
+        f"{total_routes:,} مسار"
+    )
+
+
 @app.command("rebuild-profiles")
 def rebuild_profiles() -> None:
     """يبني ملفات تعريف السرعة + أولوية صنف الطريق من العينات.
