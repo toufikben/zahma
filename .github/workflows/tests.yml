@@ -59,6 +59,7 @@ jobs:
             tests/test_provider_coverage.py \
             tests/test_night_coverage.py \
             tests/test_network_resilience.py \
+            tests/test_retry_real_socket.py \
             tests/test_collect_schedule.py \
             tests/test_backfill.py \
             tests/test_gap_detection.py \
