@@ -17,8 +17,9 @@
 | التوجيه | **0.2 ثانية/مسار** | `tests/test_router.py` (16 اختباراً) |
 | ملفات التعريف | 13,200 صفاً، 600 مقطع | `rebuild-profiles` |
 | أولوية الصنف | 5 أصناف طريق | `class_profiles` |
-| منحنى الانطلاق | 23.6 د → 11.7 د | `departure` CLI |
-| الاختبارات | **56 اختباراً، كلها ناجحة** | `pytest tests` |
+| منحنى الانطلاق | 23.6 د → 11.7 د، رتيب | `departure` CLI |
+| الاختبارات | **64 اختباراً، كلها ناجحة** | `pytest tests` |
+| CI | **أخضر على GitHub** | [actions](https://github.com/toufikben/zahma/actions) |
 
 ---
 
@@ -93,10 +94,12 @@ tests/         حرّاس — تفشل فوراً عند أي تراجع
 | الاختبار | الخطأ الذي يمنعه |
 |---|---|
 | `test_time_and_prior.py` | `bucket_15m` تقرأ UTC كأنه محلي → كل تنبؤ مزحوف ساعة |
+| `TestInterpolationMonotonic` (8 اختبارات) | منحنى متذبذب من تساوي مسافة الشرائح |
 | `test_router.py::test_length_between_crow_and_detour` | نطاق بيضاوي يعطي 6× الطول الحقيقي |
 | `test_router.py::test_reverse_differs` | تجاهل الشوارع أحادية الاتجاه |
 | `test_topology.py` | انفصال الشبكة إلى 7,544 مكوّناً |
 | CI: `spread > 2.0` | عودة منحنى الانطلاق مسطّحاً |
+| CI: `ups > 1 and downs > 1` | عودة التذبذب |
 
 ---
 
