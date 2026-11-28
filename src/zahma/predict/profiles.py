@@ -64,12 +64,22 @@ def _day_type_sql(alias: str = "s") -> str:
 
     **العطلات تبقى عطلات:** إن صنّفها تقويمنا `HOLIDAY` فلا نُعيد إسنادها،
     لأن يوم عطاء رسمي جزائري ليس له مقابل في أيام الأسبوع الغربية.
+
+    **ورمضان ليس نوع يوم — بل عمود منفصل.** كان هذا التعبير يُنتج
+    `day_type='RAMADAN'`، بينما المحرك يقرأ
+    `WHERE day_type='WORKDAY' AND is_ramadan=true`. أي أن صفوف رمضان
+    كانت تُكتب باسم **لا يُقرأ أبداً**: 30 يوماً في السنة تُجمع ثم تُهمَل
+    بصمت، والنموذج يعود إلى نمط العمل العادي في رمضان — وهو أسوأ خطأ
+    ممكن لأن رمضان يغيّر توقيت الذروة كلياً في الجزائر.
+
+    والتصميم الصحيح: `day_type` يحمل سلوك الأسبوع (WORKDAY/FRIDAY/
+    SATURDAY/HOLIDAY)، و`is_ramadan` عمود مستقل يضاعف التركيبات. المحرك
+    يفلتر بالاثنين معاً — فالتعبير يجب أن يطابقه.
     """
     whens = "\n                ".join(
         f"WHEN {dow} THEN '{dtype}'" for dow, dtype in sorted(SOURCE_DAY_TYPE_MAP.items())
     )
     return f"""CASE
-                    WHEN c.is_ramadan THEN 'RAMADAN'
                     WHEN c.day_type = 'HOLIDAY' THEN 'HOLIDAY'
                     ELSE CASE EXTRACT(ISODOW FROM ({alias}.ts_utc AT TIME ZONE 'Africa/Algiers'))::int
                 {whens}

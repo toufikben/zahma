@@ -62,6 +62,18 @@ class PathResult:
     nodes: list[int] = field(default_factory=list)
     found: bool = False
     duration_s: float = 0.0
+    # **لماذا هذا الحقل ضروري:** `_nearest` يعيد أقرب عقدة بلا حدّ مسافة.
+    # نقطة على 3 كم خارج الشبكة كانت تُسحَب إليها وتُعطي مساراً يبدو
+    # صحيحاً — خطأ صامت أخطر من «لا أعرف». نسجّل المسافة لنرفض ما يبعد
+    # أكثر من SNAP_MAX_KM، وليعرف المستدعي *كم* هو خارج التغطية.
+    snap_from_km: float = 0.0
+    snap_to_km: float = 0.0
+
+
+# أقصى مسافة إسقاط نقبلها. القياس: داخل الجزائر الوسطى الإسقاط < 0.5 كم.
+# بومرداس 11.3 كم — خارج التغطية قطعاً. 2 كم هامش سخي يغطي ضواحي
+# الولاية دون أن يبتلع مدناً أخرى.
+SNAP_MAX_KM = 2.0
 
 
 # ============================================================
@@ -285,6 +297,19 @@ def _nearest(lon: float, lat: float, k: int = MAX_SOURCES) -> list[int]:
     نجرّب عدة عقد لأن الأقرب قد يكون على حافة المكوّن. التوسيع الحلقي
     يضمن أننا نجد مرشحين حتى لو كانت الخلية فارغة.
     """
+    return [i for _, i in _nearest_with_distance(lon, lat, k)]
+
+
+def _nearest_with_distance(
+    lon: float, lat: float, k: int = MAX_SOURCES
+) -> list[tuple[float, int]]:
+    """أقرب العقد **بمسافتها** بالأمتار — أساس رفض ما هو خارج التغطية.
+
+    `_nearest` وحدها كانت تعيد أقرب عقدة بلا أي حدّ. النتيجة المقاسة:
+    نقطة في بومرداس (11.3 كم خارج الشبكة) تُسحَب إلى حافة الشبكة وتُعطي
+    مساراً يبدو معقولاً — أي **رقم خاطئ بصمت**. وهذا أسوأ من «لا أعرف»:
+    المستخدم يبني قرار سفر على مسار لم يقصده.
+    """
     grid = _grid()
     coords = _coords()
     gx = int(math.floor(lon / GRID_DEG))
@@ -310,7 +335,7 @@ def _nearest(lon: float, lat: float, k: int = MAX_SOURCES) -> list[int]:
             break
 
     found.sort(key=lambda x: x[0])
-    return [i for _, i in found[:k]]
+    return [(math.sqrt(d2), i) for d2, i in found[:k]]
 
 
 # ============================================================
@@ -387,11 +412,43 @@ def route(
     البداية متقاربة داخل 3 كم والفرق في الطول مهمل.
     """
     m = _load_matrix()
-    srcs = _nearest(from_lon, from_lat)
-    dsts = _nearest(to_lon, to_lat)
+    src_pairs = _nearest_with_distance(from_lon, from_lat)
+    dst_pairs = _nearest_with_distance(to_lon, to_lat)
 
-    if not srcs or not dsts:
-        return PathResult(seg_ids=[], length_m=0.0, found=False)
+    # **قائمة فارغة تعني «لا شيء قريب» — لا «المسافة صفر».**
+    #
+    # العيب: حين لا يجد البحث الحلقي أي عقدة، يعيد `[]`، فتبقى المسافة
+    # صفراً ويقول التشخيص «داخل التغطية لكن لا مسار» — وهو كذب. النقطة
+    # على 11 كم لم يُعثر لها على عقدة لأنها خارج مدى الحلقات أصلاً.
+    # لذلك نُسجّل مسافة لا نهائية دلالياً (999) ليدخل فرع «خارج التغطية».
+    if not src_pairs or not dst_pairs:
+        return PathResult(
+            seg_ids=[],
+            length_m=0.0,
+            found=False,
+            snap_from_km=src_pairs[0][0] / 1000.0 if src_pairs else 999.0,
+            snap_to_km=dst_pairs[0][0] / 1000.0 if dst_pairs else 999.0,
+        )
+
+    snap_from_km = src_pairs[0][0] / 1000.0
+    snap_to_km = dst_pairs[0][0] / 1000.0
+
+    # **رفض ما هو خارج التغطية — لا سحبه إلى الحافة.**
+    #
+    # بلا هذا الحد، نقطة في بومرداس (11.3 كم خارج الشبكة) تُسحَب إلى أقرب
+    # حافة وتُعطي مساراً يبدو معقولاً. رقم خاطئ بصمت أخطر من «لا أعرف»:
+    # المستخدم يقرأ 12 دقيقة لرحلة لم يقصدها.
+    if snap_from_km > SNAP_MAX_KM or snap_to_km > SNAP_MAX_KM:
+        return PathResult(
+            seg_ids=[],
+            length_m=0.0,
+            found=False,
+            snap_from_km=snap_from_km,
+            snap_to_km=snap_to_km,
+        )
+
+    srcs = [i for _, i in src_pairs]
+    dsts = [i for _, i in dst_pairs]
 
     graph = _csr(_weights(speeds))
 

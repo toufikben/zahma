@@ -97,14 +97,16 @@ class TestCollectHoursCoverFullDay:
 
         قبل الإصلاح توقفت عند 21:00، فلم تُقس أسرع ساعات اليوم إطلاقاً.
 
-        نتحقق من الثابت نفسه لا من نص الدالة: بعد استخراج القائمة إلى
-        `DEFAULT_COLLECT_HOURS` (مصدر واحد للحقيقة) لم يبقَ نص داخل
-        الدالة، والاختبار القديم كان يفحص النص فيفشل بلا عيب حقيقي.
+        **نفحص المعنى لا النص:** كان الحارس يطلب `"23:59"` تحديداً. بعد
+        إصلاح الشرائح (كل ساعة تُجمع على 00/15/30/45) صار التوقيت
+        `"23:00"` — نفس الغرض (آخر ساعة قبل منتصف الليل) بصياغة تغطي
+        الشريحة كاملة. تثبيت النص يجعل الحارس يعارض الإصلاح بلا سبب.
         """
         from zahma.cli import DEFAULT_COLLECT_HOURS
 
-        assert "23:59" in DEFAULT_COLLECT_HOURS
-        assert "03:00" in DEFAULT_COLLECT_HOURS
+        hours = [int(h.split(":")[0]) for h in DEFAULT_COLLECT_HOURS]
+        assert any(h >= 22 for h in hours), "لا ساعة ليلية متأخرة"
+        assert any(h <= 4 for h in hours), "لا ساعة فجرية — أسرع ساعات اليوم"
 
     def test_default_hours_do_not_waste_quota_on_flat_night(self):
         """ساعتان ليلاً، لا سبع. المنحنى مسطّح فلا معلومة إضافية."""

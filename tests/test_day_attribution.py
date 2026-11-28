@@ -116,10 +116,23 @@ class TestGeneratedSql:
         sql = _day_type_sql("s")
         assert "HOLIDAY" in sql
 
-    def test_ramadan_takes_precedence(self):
-        """رمضان يسبق الإسناد — شهر كامل بسلوك مختلف."""
+    def test_ramadan_is_not_a_day_type(self):
+        """رمضان ليس نوع يوم — بل عمود مستقل (إصلاح جوهري).
+
+        **العيب القديم:** التعبير كان يُنتج `day_type='RAMADAN'`، والمحرك
+        يقرأ `WHERE day_type='WORKDAY' AND is_ramadan=true`. أي أن كل
+        صفوف رمضان كانت تُكتب باسم **لا يُقرأ أبداً** — 30 يوماً في السنة
+        تُجمع ثم تُهمَل، والنموذج يعود إلى نمط العمل العادي في رمضان.
+        وهذا أسوأ خطأ ممكن لأن رمضان في الجزائر يغيّر توقيت الذروة كلياً.
+
+        **التصميم الصحيح:** `day_type` يحمل سلوك الأسبوع، و`is_ramadan`
+        عمود مستقل يضاعف التركيبات. المحرك يفلتر بالاثنين.
+        """
         sql = _day_type_sql("s")
-        assert sql.index("is_ramadan") < sql.index("ISODOW")
+        assert "RAMADAN" not in sql, (
+            "التعبير يُنتج day_type='RAMADAN' — صفوف رمضان ستُهمَل بصمت"
+        )
+        assert "HOLIDAY" in sql, "العطلات يجب أن تبقى نوعاً مستقلاً"
 
 
 class TestMeasuredEffect:
