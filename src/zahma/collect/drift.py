@@ -25,6 +25,36 @@ from zahma.config import get_settings
 from zahma.db import session_scope
 
 
+def recent_slots(limit: int = 3) -> list[tuple[int, str]]:
+    """أزواج (pair_id، خانة) مخزَّنة فعلاً — الخانات التي يمكن مقارنتها.
+
+    **لماذا هذا ضروري:** `verify_slot` يقارن المخزَّن بما يعيده المصدر.
+    لو مرّرنا خانة لا صفوف لها (مثل تاريخ مستقبلي لم نجمعه)، يفشل الفحص
+    بـ«لا صفوف مخزَّنة» — وهو فشل صحيح لكنه بلا معنى: لم نقارن شيئاً.
+
+    الفحص المجدول لا يعرف أي الخانات جمعنا، فبدل تخمينها نسأل القاعدة.
+    """
+    with session_scope() as ss:
+        rows = ss.execute(
+            text(
+                """
+                SELECT pair_id,
+                       to_char(ts_bucket AT TIME ZONE 'Africa/Algiers',
+                               'YYYY-MM-DD"T"HH24:MI') AS slot,
+                       count(*) AS n
+                FROM segment_pair_samples
+                WHERE source::text = 'mapbox'
+                GROUP BY 1, 2
+                HAVING count(*) >= 50
+                ORDER BY 2 DESC, n DESC
+                LIMIT :lim
+                """
+            ),
+            {"lim": limit},
+        ).all()
+    return [(int(r[0]), str(r[1])) for r in rows]
+
+
 def verify_slot(
     pair_id: int,
     depart_at: str,

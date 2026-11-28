@@ -1,0 +1,156 @@
+name: Drift check
+
+# **لماذا هذا الملف موجود — وما لا يفعله.**
+#
+# قِسنا الجدول على 11,570 مقطع-قياس (20 زوجاً، خانة واحدة): **100.000%
+# مطابقة تامة**. وأثبتنا سابقاً أن النداء الحي يعيد الجدول حرفياً (نفس بصمة
+# السرعات على 634 و328 حافة)، وأن `depart_at` لماضٍ يعيد نفس الرقم بعد سنة.
+#
+# أي أن: **جمع البيانات دورياً لا يجمع شيئاً جديداً.** كل ما يفعله هو إعادة
+# قراءة نفس الجدول. فالجمع كل 30 دقيقة مضيعة صافية.
+#
+# القيمة الوحيدة الباقية هي **كشف تغيّر الجدول عبر الزمن** — أي هل ما زال
+# المصدر يعطي نفس الأرقام بعد شهر؟ وهذا يحتاج شيئاً واحداً لا نملكه في CI:
+# **قاعدة بيانات دائمة**. خدمة Postgres في GitHub Actions عابرة (service
+# container يموت مع الوظيفة)، فلا يمكنها أن تحمل المرجع الذي نقارن به.
+#
+# لذلك هذا الـworkflow **لا يعمل بلا سرّ `DATABASE_URL`** — ويتخطّى نفسه
+# بصدق ويقول السبب. لا ندّعي مراقبة لا تحدث.
+#
+# **ما يحتاجه التشغيل الحقيقي:**
+#   1. قاعدة Postgres دائمة مجانية (Neon / Supabase free tier).
+#   2. `DATABASE_URL` كسرّ في المستودع.
+#   3. `MAPBOX_TOKEN` كسرّ.
+# ثم يشتغل هذا الملف وحده بلا أي تعديل.
+#
+# **التكلفة المقاسة:** 20 زوجاً × 3 خانات = 60 طلباً لكل تشغيل أسبوعي
+# ⇒ ~260 طلباً شهرياً من حصة 100,000. لا شيء.
+
+on:
+  schedule:
+    # كل اثنين 05:00 UTC = 06:00 محلياً — قبل الذروة، بعد نهاية الأسبوع.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: drift-check
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    name: Compare stored table to the source
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      PYTHONUTF8: "1"
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      MAPBOX_TOKEN: ${{ secrets.MAPBOX_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check prerequisites
+        id: pre
+        run: |
+          missing=""
+          [ -z "$DATABASE_URL" ] && missing="$missing DATABASE_URL"
+          [ -z "$MAPBOX_TOKEN" ] && missing="$missing MAPBOX_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Drift check skipped"
+              echo ""
+              echo "Missing secrets:$missing"
+              echo ""
+              echo "This is expected until a persistent Postgres exists."
+              echo "CI's Postgres service container is ephemeral: it cannot"
+              echo "hold the reference rows the comparison needs. Measured"
+              echo "on 11,570 segment-measurements the table is 100.000%"
+              echo "identical, so periodic *collection* would add nothing —"
+              echo "only drift detection over time has value, and that"
+              echo "requires a database that outlives the job."
+              echo ""
+              echo "See the comment header of this workflow."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.pre.outputs.ready == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        if: steps.pre.outputs.ready == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Verify schema is present
+        if: steps.pre.outputs.ready == 'true'
+        run: |
+          python - <<'PY'
+          from sqlalchemy import text
+          from zahma.db import session_scope
+
+          with session_scope() as s:
+              rows = s.execute(
+                  text(
+                      "SELECT count(*) FROM segment_pair_samples "
+                      "WHERE ts_bucket > now() - interval '90 days'"
+                  )
+              ).scalar()
+          print(f"reference rows in the last 90 days: {rows}")
+          if not rows:
+              raise SystemExit(
+                  "no reference rows — nothing to compare against. "
+                  "Run a collection first, or the drift check is meaningless."
+              )
+          PY
+
+      - name: Drift check
+        if: steps.pre.outputs.ready == 'true'
+        run: |
+          # الوضع التلقائي يختار أحدث (زوج، خانة) مخزَّنة فعلاً. لا نخمّن
+          # تواريخ: الخانة المخزَّنة هي الوحيدة التي يمكن مقارنتها.
+          python -m zahma.cli drift --auto 6
+
+      - name: Report drift summary
+        if: steps.pre.outputs.ready == 'true'
+        run: |
+          python - <<'PY'
+          from sqlalchemy import text
+          from zahma.db import session_scope
+
+          with session_scope() as s:
+              rows = s.execute(
+                  text(
+                      """
+                      SELECT scope, count(*) AS changed,
+                             round(avg(abs_diff)::numeric, 3) AS mean_diff,
+                             round(max(abs_diff)::numeric, 3) AS max_diff,
+                             max(detected_at) AS last_seen
+                      FROM table_drift
+                      WHERE detected_at > now() - interval '7 days'
+                      GROUP BY 1
+                      """
+                  )
+              ).mappings().all()
+          if not rows:
+              print("### Drift check: table unchanged")
+              print("")
+              print("No drift rows recorded in the last 7 days.")
+          else:
+              print("### Drift check: the table changed")
+              print("")
+              print("| scope | changed | mean diff | max diff | last seen |")
+              print("|---|---|---|---|---|")
+              for r in rows:
+                  print(
+                      f"| {r['scope']} | {r['changed']} | {r['mean_diff']} | "
+                      f"{r['max_diff']} | {r['last_seen']} |"
+                  )
+          PY

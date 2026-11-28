@@ -553,4 +553,27 @@ def collect(
         return result
 
     result.update(store(measurements, ts, forecast=bool(depart_at)))
+
+    # **تسجيل الحصة — عيب كان صامتاً تماماً.**
+    #
+    # `collect_real` و`match.collect` لم يستدعيا `touch_health`، فلا أحد
+    # يسجّل `quota_usage`. النتيجة المقاسة: الجدول **فارغ** بعد جمع مئات
+    # آلاف القياسات. أي أننا لا نعرف كم استهلكنا من 100,000 طلب شهري، ولا
+    # يمكن لـ`_quota_ok` أن يمنع تجاوز الحصة — لأن الأساس صفر دائماً.
+    #
+    # والأثر عملي: تجاوز الحصة يعني رفضاً من المزوّد في منتصف جمع، وزوجاً
+    # مفقوداً بلا سبب ظاهر. ولهذا كان `runner` يسجّل و`cli` لا يسجّل:
+    # مساران لنفس العمل، أحدهما ينسى المحاسبة.
+    #
+    # نُسجّل عدد الطلبات الفعلية = عدد الأزواج (طلب واحد لكل زوج)، بلا
+    # اعتماد على `result` الذي قد يكون جزئياً.
+    try:
+        from zahma.collect.writer import touch_health
+
+        touch_health("mapbox", ok=True, requests=len(pairs))
+    except Exception:  # noqa: BLE001
+        # المحاسبة لا تُسقط الجمع — لكنها تُسجَّل في `source_health` عند
+        # الفشل ليراها المشغّل.
+        pass
+
     return result

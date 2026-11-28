@@ -301,10 +301,13 @@ def _planned_hours() -> set[int]:
 
 @app.command("drift")
 def drift_check(
-    pairs: str = typer.Option("15", help="أزواج مفصولة بفاصلة"),
+    pairs: str = typer.Option("", help="أزواج مفصولة بفاصلة (فراغ = تلقائي)"),
     slots: str = typer.Option(
-        "2026-12-06T23:00,2026-12-02T08:00,2026-12-04T17:00",
-        help="خانات مفصولة بفاصلة",
+        "",
+        help="خانات مفصولة بفاصلة (فراغ = أحدث الخانات المخزَّنة)",
+    ),
+    auto: int = typer.Option(
+        6, help="عدد الخانات التلقائية إن لم تُحدَّد"
     ),
 ) -> None:
     """يتحقق أن جدول المصدر لم يتغير — ويسجّل أي انحراف.
@@ -319,32 +322,53 @@ def drift_check(
     **وهذا هو المبرّر الوحيد للجمع الدوري:** قياسنا أثبت أن الجمع الحي
     يعيد الجدول حرفياً (نفس بصمة السرعات)، فالجمع المتكرر لا يضيف قياساً
     جديداً. قيمته الوحيدة أنه يكشف تغيّر الجدول — وهذا ما يقيسه هذا الأمر.
-    """
-    from zahma.collect.drift import verify_slot
 
-    pair_ids = [int(p.strip()) for p in pairs.split(",") if p.strip()]
+    **وبعد إصلاح تصادم الكتابة، القياس على 11,570 مقطع-قياس أعطى 100.000%
+    مطابقة.** أي أن «الانحراف» الذي رأيناه سابقاً كان عيباً في كتابتنا لا
+    تغيّراً في المصدر. هذا الأمر الآن يراقب السؤال الصحيح: هل ما زال
+    المصدر يعطي نفس الأرقام بعد زمن؟
+
+    **بلا `--pairs` أو `--slots`** يختار أحدث الخانات المخزَّنة تلقائياً —
+    وإلا فكل خانة نخمّنها قد تكون فارغة، فيصير الفحص بلا معنى. الاختيار
+    التلقائي **يقترن** (زوج، خانة) كما هما في القاعدة، لا يضربهما تقاطعياً:
+    خانة جمعها الزوج 3 لا يقارنها الزوج 7.
+    """
+    from zahma.collect.drift import recent_slots, verify_slot
+
     slot_list = [s.strip() for s in slots.split(",") if s.strip()]
+    pair_ids = [int(p.strip()) for p in pairs.split(",") if p.strip()]
+
+    if slot_list and pair_ids:
+        targets = [(pid, slot) for pid in pair_ids for slot in slot_list]
+    else:
+        targets = recent_slots(limit=auto)
+        if not targets:
+            console.print(
+                "[yellow]لا خانات مخزَّنة — لا شيء نقارنه. "
+                "شغّل `collect-real` أولاً.[/yellow]"
+            )
+            raise typer.Exit(1)
+        console.print(f"[dim]تلقائي: {len(targets)} (زوج، خانة) مخزَّنة[/dim]")
 
     total_cmp = 0
     total_drift = 0
-    for pid in pair_ids:
-        for slot in slot_list:
-            r = verify_slot(pid, slot)
-            if not r.get("ok"):
-                console.print(f"[dim]  {pid} {slot}: {r.get('error')}[/dim]")
-                continue
-            total_cmp += r["compared"]
-            total_drift += r["drifted"]
-            style = "green" if r["drifted"] == 0 else "yellow"
+    for pid, slot in targets:
+        r = verify_slot(pid, slot)
+        if not r.get("ok"):
+            console.print(f"[dim]  {pid} {slot}: {r.get('error')}[/dim]")
+            continue
+        total_cmp += r["compared"]
+        total_drift += r["drifted"]
+        style = "green" if r["drifted"] == 0 else "yellow"
+        console.print(
+            f"  pair={pid} {slot}: {r['compared']:>4} مقطع | "
+            f"[{style}]انحراف {r['drifted']} ({r['drift_pct']}%)[/{style}]"
+        )
+        for ex in r["examples"]:
             console.print(
-                f"  pair={pid} {slot}: {r['compared']:>4} مقطع | "
-                f"[{style}]انحراف {r['drifted']} ({r['drift_pct']}%)[/{style}]"
+                f"      مقطع {ex['segment_id']}: "
+                f"{ex['old']} → {ex['new']} (فرق {ex['abs_diff']})"
             )
-            for ex in r["examples"]:
-                console.print(
-                    f"      مقطع {ex['segment_id']}: "
-                    f"{ex['old']} → {ex['new']} (فرق {ex['abs_diff']})"
-                )
 
     console.print(
         f"\n[bold]الإجمالي:[/bold] {total_cmp:,} مقارنة، "
