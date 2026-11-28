@@ -299,6 +299,63 @@ def _planned_hours() -> set[int]:
     return {int(hh.split(":")[0]) for hh in DEFAULT_COLLECT_HOURS}
 
 
+@app.command("drift")
+def drift_check(
+    pairs: str = typer.Option("15", help="أزواج مفصولة بفاصلة"),
+    slots: str = typer.Option(
+        "2026-12-06T23:00,2026-12-02T08:00,2026-12-04T17:00",
+        help="خانات مفصولة بفاصلة",
+    ),
+) -> None:
+    """يتحقق أن جدول المصدر لم يتغير — ويسجّل أي انحراف.
+
+    **لماذا هذا الأمر موجود:** `samples` يستخدم `ON CONFLICT ... DO UPDATE`،
+    فإعادة جمع نفس الساعة تستبدل القيمة القديمة **بصمت**. لو تغيّر جدول
+    Mapbox بين جمعين، لا يمكن معرفة ذلك — الانحراف يُمحى في لحظة كتابته.
+
+    **والقياس أثبت أنه يحدث:** خانة واحدة من تسع (2026-12-06 23:00) أعادت
+    9.92 بدل 33.82 المخزَّنة. بلا هذا الأمر، إعادة جمعها تمحو الدليل.
+
+    **وهذا هو المبرّر الوحيد للجمع الدوري:** قياسنا أثبت أن الجمع الحي
+    يعيد الجدول حرفياً (نفس بصمة السرعات)، فالجمع المتكرر لا يضيف قياساً
+    جديداً. قيمته الوحيدة أنه يكشف تغيّر الجدول — وهذا ما يقيسه هذا الأمر.
+    """
+    from zahma.collect.drift import verify_slot
+
+    pair_ids = [int(p.strip()) for p in pairs.split(",") if p.strip()]
+    slot_list = [s.strip() for s in slots.split(",") if s.strip()]
+
+    total_cmp = 0
+    total_drift = 0
+    for pid in pair_ids:
+        for slot in slot_list:
+            r = verify_slot(pid, slot)
+            if not r.get("ok"):
+                console.print(f"[dim]  {pid} {slot}: {r.get('error')}[/dim]")
+                continue
+            total_cmp += r["compared"]
+            total_drift += r["drifted"]
+            style = "green" if r["drifted"] == 0 else "yellow"
+            console.print(
+                f"  pair={pid} {slot}: {r['compared']:>4} مقطع | "
+                f"[{style}]انحراف {r['drifted']} ({r['drift_pct']}%)[/{style}]"
+            )
+            for ex in r["examples"]:
+                console.print(
+                    f"      مقطع {ex['segment_id']}: "
+                    f"{ex['old']} → {ex['new']} (فرق {ex['abs_diff']})"
+                )
+
+    console.print(
+        f"\n[bold]الإجمالي:[/bold] {total_cmp:,} مقارنة، "
+        f"{total_drift:,} انحراف"
+    )
+    if total_drift:
+        console.print("[yellow]الجدول تغيّر — راجع `table_drift_summary`[/yellow]")
+    else:
+        console.print("[green]الجدول ثابت في كل الخانات المفحوصة[/green]")
+
+
 @app.command("rebuild-profiles")
 def rebuild_profiles() -> None:
     """يبني ملفات تعريف السرعة + أولوية صنف الطريق من العينات.

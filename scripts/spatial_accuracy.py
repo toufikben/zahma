@@ -36,9 +36,6 @@ from sqlalchemy import text
 
 from zahma.db import session_scope
 
-PAIR_RE = re.compile(r"pair=(\d+)")
-
-
 def bucket_of(ts) -> int:
     """رقم الشريحة الربعية بالتوقيت المحلي (0..95)."""
     from zoneinfo import ZoneInfo
@@ -48,26 +45,37 @@ def bucket_of(ts) -> int:
 
 
 def load() -> list[dict]:
-    """كل القياسات الحقيقية مع صنف الطريق ورقم الزوج."""
+    """كل القياسات الحقيقية مع صنف الطريق ورقم الزوج.
+
+    **يقرأ من `segment_pair_samples` لا `samples`:** بعد إصلاح تصادم
+    الكتابة، `samples` صار يحمل قيمة **مجمَّعة** لكل مقطع (وسيط موزون)،
+    بينما `segment_pair_samples` يحمل قياس كل زوج على حدة.
+
+    وهذا ليس تفصيلاً شكلياً: تقييم الدقة المكانية يقارن قياس الزوج بما
+    تتنبأ به المقاطع المجاورة — وهو يحتاج **قياس زوج واحد** لا متوسط
+    عدة أزواج. المتوسط يخفي خطأ الإسقاط الذي نقيسه، لأن أخطاء الأزواج
+    المتعاكسة تتلاشى في الوسيط.
+
+    وكان الكود يقرأ `raw_ref` ليستخرج `pair=N`. بعد التجميع صار الحقل
+    `pairs=N` (عدد لا معرّف)، فكان سيتجاهل كل الصفوف الجديدة بصمت
+    ويقيّم على بيانات قديمة فقط.
+    """
     with session_scope() as s:
         rows = s.execute(
             text(
                 """
-                SELECT s.segment_id, s.speed_kmh, s.ts_utc,
-                       sg.road_class, sg.length_m, sg.speed_free_kmh, s.raw_ref
-                FROM samples s
-                JOIN segments sg ON sg.seg_id = s.segment_id
-                WHERE s.source = 'mapbox'
-                  AND s.speed_kmh BETWEEN 3 AND 130
+                SELECT sp.segment_id, sp.speed_kmh, sp.ts_utc, sp.pair_id,
+                       sg.road_class, sg.length_m, sg.speed_free_kmh
+                FROM segment_pair_samples sp
+                JOIN segments sg ON sg.seg_id = sp.segment_id
+                WHERE sp.source = 'mapbox'
+                  AND sp.speed_kmh BETWEEN 3 AND 130
                 """
             )
         ).mappings().all()
 
     out = []
     for r in rows:
-        m = PAIR_RE.search(r["raw_ref"] or "")
-        if not m:
-            continue
         ts = r["ts_utc"]
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC)
@@ -77,7 +85,7 @@ def load() -> list[dict]:
                 "speed": float(r["speed_kmh"]),
                 "b": bucket_of(ts),
                 "cls": r["road_class"],
-                "pair": int(m.group(1)),
+                "pair": int(r["pair_id"]),
                 "len": float(r["length_m"]),
                 "free": float(r["speed_free_kmh"]),
             }

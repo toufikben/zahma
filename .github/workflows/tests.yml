@@ -64,6 +64,7 @@ jobs:
             tests/test_backfill.py \
             tests/test_gap_detection.py \
             tests/test_day_attribution.py \
+            tests/test_write_collision.py \
             tests/test_forecast_never_live.py \
             -v --tb=short
 

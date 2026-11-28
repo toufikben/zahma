@@ -302,30 +302,63 @@ def store(
     source: str = "mapbox",
     forecast: bool = False,
 ) -> dict:
-    """يخزّن القياسات في `samples` و`route_samples` — idempotent.
+    """يخزّن القياسات في `samples` و`route_samples` — idempotent وحتمي.
 
     `forecast=True` يعني أن البيانات تنبؤ المزوّد لوقت مستقبلي (أرسلنا
     `depart_at`) لا قياساً آنياً. نفرّق بينهما في `raw_ref` حتى نعرف —
     عند تقييم دقة نموذجنا — أي صفوف كانت «الحقيقة» وأيها كانت تنبؤاً.
+
+    **العيب الذي أصلحه التجميع هنا:** كان الكود يُدرج صفاً لكل حافة،
+    والمفتاح `(segment_id, source, ts_bucket)` يقبل صفاً واحداً. فيحدث
+    `ON CONFLICT DO UPDATE` — أي **آخر كاتب يفوز**. والكتابة تجري عبر
+    `ThreadPoolExecutor`، فالفائز يعتمد على ترتيب إنهاء الطلبات، لا على
+    الطريق.
+
+    المقاس: 17.2 زوجاً في الشريحة تعطي ~6,800 حافة، لكن المخزَّن 4,350
+    صفاً — أي أن **~36% من القياسات تُمحى بلا أثر**. وأثبتنا ذلك مباشرة:
+    مقطع بقيمة 20 ثم 80 كم/س يبقى صف واحد بـ80، و20 ضاعت بلا سجل.
+
+    **الإصلاح:** نجمع كل قياسات المقطع في الشريحة أولاً (وسيط موزون
+    بمسافة الحافة، لأن حافة 5 م لا تساوي حافة 300 م)، ثم نكتب صفاً واحداً
+    حتمياً. الترتيب لم يبق له أثر: الوسيط لا يعتمد على ترتيب الإدخال.
+
+    `raw_ref` يحمل عدد الأزواج المساهمة — بلا ذلك لا يمكن معرفة أن الصف
+    نتيجة تجميع لا قياس واحد.
     """
     bucket = _bucket(ts)
     tag = "forecast" if forecast else "live"
 
-    seg_rows = []
+    # تجميع حتمي: (segment_id) ⇒ [(speed, dist, pair_id)]
+    per_seg: dict[int, list[tuple[float, float, int]]] = {}
     for m in measurements:
         for e in m.edges:
-            seg_rows.append(
-                {
-                    "segment_id": e.seg_id,
-                    "source": source,
-                    "ts_utc": ts,
-                    "ts_bucket": bucket,
-                    "speed_kmh": e.speed_kmh,
-                    "travel_time_s": None,
-                    "confidence": 0.85,
-                    "raw_ref": f"pair={m.pair_id};{tag};mapbox_steps",
-                }
-            )
+            per_seg.setdefault(e.seg_id, []).append((e.speed_kmh, e.dist_m, m.pair_id))
+
+    seg_rows = []
+    for seg_id, obs in per_seg.items():
+        obs.sort(key=lambda o: (o[0], o[2]))  # ترتيب ثابت: لا يعتمد على الخيوط
+        total_w = sum(o[1] for o in obs) or 1.0
+        # الوسيط الموزون بالمسافة: نصف المسافة الكلية.
+        acc = 0.0
+        chosen = obs[-1][0]
+        for speed, dist, _ in obs:
+            acc += dist
+            if acc >= total_w / 2:
+                chosen = speed
+                break
+        pairs = len({o[2] for o in obs})
+        seg_rows.append(
+            {
+                "segment_id": seg_id,
+                "source": source,
+                "ts_utc": ts,
+                "ts_bucket": bucket,
+                "speed_kmh": round(chosen, 2),
+                "travel_time_s": None,
+                "confidence": 0.85,
+                "raw_ref": f"pairs={pairs};{tag};mapbox_steps",
+            }
+        )
 
     route_rows = []
     for m in measurements:
@@ -347,6 +380,38 @@ def store(
                 "confidence": 0.85,
             }
         )
+
+    # تفصيل لكل زوج: كان `ON CONFLICT` يمحو هذا التفصيل بلا أثر.
+    detail_rows = []
+    for m in measurements:
+        for e in m.edges:
+            detail_rows.append(
+                {
+                    "segment_id": e.seg_id,
+                    "pair_id": m.pair_id,
+                    "source": source,
+                    "ts_utc": ts,
+                    "ts_bucket": bucket,
+                    "speed_kmh": e.speed_kmh,
+                    "dist_m": e.dist_m,
+                    "offset_m": e.offset_m,
+                }
+            )
+
+    ins_detail = text(
+        """
+        INSERT INTO segment_pair_samples
+            (segment_id, pair_id, source, ts_utc, ts_bucket,
+             speed_kmh, dist_m, offset_m)
+        VALUES
+            (:segment_id, :pair_id, CAST(:source AS source_kind), :ts_utc,
+             :ts_bucket, :speed_kmh, :dist_m, :offset_m)
+        ON CONFLICT (segment_id, pair_id, source, ts_bucket) DO UPDATE
+        SET speed_kmh = EXCLUDED.speed_kmh,
+            dist_m = EXCLUDED.dist_m,
+            offset_m = EXCLUDED.offset_m
+        """
+    )
 
     ins_seg = text(
         """
@@ -380,6 +445,8 @@ def store(
     )
 
     with session_scope() as s:
+        if detail_rows:
+            s.execute(ins_detail, detail_rows)
         if seg_rows:
             s.execute(ins_seg, seg_rows)
         if route_rows:
@@ -388,6 +455,7 @@ def store(
     return {
         "segments": len(seg_rows),
         "routes": len(route_rows),
+        "detail_rows": len(detail_rows),
         "bucket": bucket.isoformat(),
     }
 
